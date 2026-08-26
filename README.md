@@ -139,7 +139,7 @@ The repository holds the complete robot, built up in stages:
 | Stage | Contents | Status |
 |---|---|---|
 | **1. Arm** | 3-DoF manipulator — model, kinematics, MoveIt 2, hardware driver, firmware, UIs, Isaac Sim twin + RL | ✅ [`arm/`](arm/) |
-| **2. Base** | Mobile base — drive, RealSense, dynamic visual SLAM, Isaac Sim scenes | ✅ repo root |
+| **2. Base** | Mobile base — drive, RealSense, dynamic visual SLAM, Isaac Sim scenes | ✅ `scenes/`, `scripts/` |
 | **3. Integration** | Arm on the base; whole-robot navigation + manipulation | 🔶 in progress |
 
 ### The arm — [`arm/`](arm/)
@@ -159,27 +159,40 @@ IsaacLab PPO tasks (via `rsl_rl`): `NewArm-Reach-v0` (~81 % within 1 cm),
 `NewArm-Insert-v0` (96.2 % terminal accuracy, best checkpoint),
 `NewArm-VisionInsert-v0` (~80 % peak, capped by camera field of view).
 
-### The base — repo root
+### The base
 
-The ROS 2 driver (`robot_drive_and_publish.py`), build and diagnostic scripts, SLAM
-evaluation figures in [`figures/`](figures/), and measured platform specifications
-in [`ROBOT_SPECS.md`](ROBOT_SPECS.md).
+| Directory | Contents |
+|---|---|
+| [`scenes/`](scenes/) | Isaac Sim USD stages (19 files) |
+| [`scripts/build/`](scripts/build/) | Scene construction — wheel/caster builds, rescaling, motor model, GUI copy |
+| [`scripts/diagnostics/`](scripts/diagnostics/) | Probes — depth, motion, direction, geometry, kinematics, motor, specs |
+| [`scripts/ros/`](scripts/ros/) | ROS 2 bridges — `robot_drive_and_publish.py`, `robot_base_camera_ros.py` |
+| [`scripts/analysis/`](scripts/analysis/) | Figure generation, SLAM path plotting, offline renders |
+| [`data/`](data/) | Probe outputs — trajectory CSV, kinematics/motion JSON, specs dump |
+| [`figures/`](figures/) | Report figures (SLAM accuracy, socket detection, navigation) |
+| [`renders/`](renders/) | Design-iteration renders (ball caster, 4WD, rescale passes) |
+| [`env/`](env/) | Warehouse environment stage |
+
+Measured platform specifications are in [`ROBOT_SPECS.md`](ROBOT_SPECS.md).
 
 #### Isaac Sim scenes
 
-`new_built_robot_ros.usd` is the self-contained robot-in-environment scene — the
-one to open first. It holds the robot (chassis, two drive wheels, two dual-omni
-casters, D435i), a ground plane, five obstacles, two walls, a dome light, and a
-PhysX scene with a tire-friction table. `new_built_robot_gui.usd` is the same
-scene with the operator UI graph; `lizard.usd` references it and is the stage
-`ROBOT_SPECS.md` was measured from.
+`scenes/new_built_robot_ros.usd` is the one to open first: the robot (chassis, two
+drive wheels, two dual-omni casters, D435i) on a ground plane with five obstacles,
+two walls, a dome light, and a PhysX scene carrying a tire-friction table.
+`new_built_robot_gui.usd` is the same stage plus the operator UI graph, and
+`lizard.usd` references it — that is the stage `ROBOT_SPECS.md` was measured from.
 
 ![Robot in the Isaac Sim scene](docs/images/sim_robot_scene.png)
 
-`env/warehouse.usd` is a larger 25.6 × 40 m warehouse (Isaac's Simple Warehouse
-layout). It is a **layout-only** file: it positions 424 prop references but ships
-no prop geometry, so its props resolve from NVIDIA's Isaac asset server and it
-needs network access on first open. Opening it offline gives an empty shell.
+> **The scenes are not self-contained.** They reference ~130 MB of mesh assets
+> (`robot_base.usd`, wheel and D435i meshes) from a `Robot/` tree that sits beside
+> this repository rather than inside it, and the arm-era stages reference an
+> `ARM URDF/` tree the same way. Those assets are too large to vendor without Git
+> LFS, so a fresh clone opens the stages with their transforms intact but their
+> geometry missing. `env/warehouse.usd` behaves similarly: it is a layout-only
+> file positioning 424 prop references that resolve from NVIDIA's Isaac asset
+> server, so it needs network access on first open.
 
 ---
 
@@ -205,7 +218,7 @@ ros2 launch new_arm_moveit_config arm_bringup.launch.py
 > The ROS packages live under `arm/` here but are developed as a colcon workspace
 > (symlinked into `~/ros2_ws/src`). The arm's Isaac Sim USD assets, RL checkpoints, and
 > render dumps are intentionally not committed — regenerate them with the `new_arm_isaac`
-> scripts. The mobile base **does** commit its USD scenes at the repo root; see
+> scripts. The mobile base **does** commit its USD scenes, under `scenes/`; see
 > [`.gitignore`](.gitignore).
 
 The host-side ROS 2 bringup for the integrated system (cuVSLAM + nvblox + Nav2 launch
