@@ -26,7 +26,23 @@ import sys
 from isaaclab.app import AppLauncher
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for cli_args next to play.py
-sys.path.insert(0, "/home/salman/Documents/grad_robot/IsaacLab/scripts/reinforcement_learning/rsl_rl")
+# rsl_rl cli_args lives in the IsaacLab tree; resolve it robustly (the install has moved
+# between /home/salman/Documents/grad_robot/IsaacLab and /DataDrive/IsaacLab). Honour
+# $ISAACLAB_PATH first, then known locations; fail loud with a clear message.
+_RSL_SUBPATH = "scripts/reinforcement_learning/rsl_rl"
+_ISAACLAB_CANDIDATES = [
+    os.path.join(os.environ.get("ISAACLAB_PATH", ""), _RSL_SUBPATH),
+    os.path.join("/DataDrive/IsaacLab", _RSL_SUBPATH),
+    os.path.join(os.path.expanduser("~/Documents/grad_robot/IsaacLab"), _RSL_SUBPATH),
+]
+for _p in _ISAACLAB_CANDIDATES:
+    if _p and os.path.exists(os.path.join(_p, "cli_args.py")):
+        sys.path.insert(0, _p)
+        break
+else:
+    raise SystemExit(
+        "cannot locate IsaacLab's rsl_rl/cli_args.py; set ISAACLAB_PATH to your IsaacLab root. "
+        f"tried: {[p for p in _ISAACLAB_CANDIDATES if p]}")
 import cli_args  # isort: skip  # noqa: E402
 
 parser = argparse.ArgumentParser(description="Evaluate terminal insertion accuracy of RSL-RL checkpoints.")
@@ -40,6 +56,9 @@ parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--diagnose", action="store_true",
                     help="for a single checkpoint: bin terminal accuracy by target azimuth/radius/height")
+parser.add_argument("--dump", type=str, default=None,
+                    help="save per-episode {err_mm, target_xyz (arm-base frame), success} to this .npz "
+                         "(held-out eval set for Experiment-5 Table 16/17 + Fig 33/34). Use one checkpoint.")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -49,6 +68,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import gymnasium as gym  # noqa: E402
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
@@ -111,7 +131,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         base.common_step_counter = FORCE_FULL_DIFFICULTY
 
         succ_chunks, err_chunks = [], []
-        diag_targets, diag_succ = [], []
+        diag_targets, diag_succ, diag_err = [], [], []
         steps = args_cli.episodes * horizon + 2
         with torch.inference_mode():
             # reset INSIDE inference_mode: _reset_idx does in-place sim writes that torch
@@ -128,12 +148,15 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                     s = log["metric/ep_terminal_success"].detach().float().cpu()
                     succ_chunks.append(s)
                     err_chunks.append(log["metric/ep_terminal_err_mm"].detach().float().cpu())
-                    # diagnose: episodes are synchronous so on a truncation step term_mask is
-                    # all envs -> s aligns with every env's current target (pre-reset).
-                    if args_cli.diagnose and s.numel() == base.num_envs:
+                    # diagnose/dump: episodes are synchronous so on a truncation step term_mask
+                    # is all envs -> s aligns with every env's current target (pre-reset). The
+                    # arm root is fixed at each env origin, so (target - env_origin) is the target
+                    # in the ARM-BASE frame (what Fig 34 / Table 17 want).
+                    if (args_cli.diagnose or args_cli.dump) and s.numel() == base.num_envs:
                         tl = (base.target_pos_w - base.scene.env_origins).detach().cpu()
                         diag_targets.append(tl)
                         diag_succ.append(s)
+                        diag_err.append(log["metric/ep_terminal_err_mm"].detach().float().cpu())
 
         succ = torch.cat(succ_chunks) if succ_chunks else torch.tensor([float("nan")])
         err = torch.cat(err_chunks) if err_chunks else torch.tensor([float("nan")])
@@ -144,6 +167,22 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         name = os.path.basename(ckpt)
         print(f"[eval] {name:<22} {acc:>12.4f} {mean_err:>12.2f} {p90:>11.2f} {n:>7d}")
         results.append((name, acc, mean_err, n))
+
+        # --- held-out per-episode dump for Experiment-5 figures/tables ---
+        if args_cli.dump and diag_targets:
+            T = torch.cat(diag_targets).numpy()          # (N,3) target xyz in arm-base frame (m)
+            E = torch.cat(diag_err).numpy()              # (N,) terminal plug-tip->socket error (mm)
+            S = torch.cat(diag_succ).numpy()             # (N,) terminal success @ tol_mm (0/1)
+            out = args_cli.dump
+            if len(checkpoints) > 1:                      # avoid clobber when sweeping ckpts
+                base_, ext = os.path.splitext(out)
+                out = f"{base_}_{os.path.splitext(name)[0]}{ext}"
+            np.savez(out, target_xyz=T, err_mm=E, success=S,
+                     task=args_cli.task, tol_mm=tol_mm, checkpoint=ckpt,
+                     seed=args_cli.seed, num_envs=args_cli.num_envs, episodes=args_cli.episodes)
+            print(f"[eval][dump] wrote {out}  N={E.shape[0]}  "
+                  f"mean={E.mean():.2f}mm median={np.median(E):.2f}mm "
+                  f"p90={np.percentile(E,90):.2f}mm succ@10={100*(E<=10).mean():.1f}%")
 
         if args_cli.diagnose and diag_targets:
             T = torch.cat(diag_targets)        # (N,3) target in env frame
