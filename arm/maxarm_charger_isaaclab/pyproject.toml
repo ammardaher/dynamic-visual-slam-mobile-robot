@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maxarm-charger"
+version = "0.1.0"
+description = "Isaac Lab MaxArm charger alignment RL task"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = [
+    "maxarm_charger",
+    "maxarm_charger.tasks",
+    "maxarm_charger.tasks.direct",
+    "maxarm_charger.utils",
+    "maxarm_charger.agents",
+]
