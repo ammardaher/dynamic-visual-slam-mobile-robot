@@ -28,7 +28,25 @@ new_arm_isaac/
     add_ee_camera.py     add/refresh the EE camera on an existing USD (no re-import)
     digital_twin.py      ROS 2 twin = drop-in ESP32 replacement
     standalone_control.py  no-ROS Cartesian/named-pose demo
+    eval_accuracy.py     held-out accuracy eval of a checkpoint (--dump <npz> for offline analysis)
+    make_exp5_results.py   offline: eval dumps -> Table 16/17 + Fig 33/34
+    plot_fig32_convergence.py  PPO convergence figure straight from tfevents
+    render_scene.py      headless RTX renders (insertion + reach poses)
+  meshes/
+    generate_stls.py     watertight plug/socket STLs, dimensions asserted against config.py
+    build_step.py        exact-BREP STEP solids for CATIA
+    DIMENSIONS.md        plug/socket dimension tables
+  MaxArm_RL_Technical_Reference.md  full technical write-up of the RL work
+  EXP5_RUNBOOK.md        reproducing the Experiment-5 results
+  CENTERPOSE_RUNBOOK.md  CenterPose socket-pose pipeline
 ```
+
+Machine-specific paths in `config.py` can be overridden with `NEW_ARM_ISAAC_ROOT`,
+`NEW_ARM_WORKSPACE` and `NEW_ARM_DATA_DIR`. By default the URDF is taken from this
+repository's `arm/new_arm_description`.
+
+The first prototype of this task (`MaxArm-Charger-Align-v0`) is kept in
+[`../maxarm_charger_isaaclab`](../maxarm_charger_isaaclab) for reference.
 
 ## 0. One-time: convert the URDF to USD
 
@@ -115,6 +133,16 @@ cd /home/salman/Documents/grad_robot/IsaacLab
 Task: drive the wrist tip to a random reachable target. Action = 3 joint deltas (no
 IK in the loop); obs = `[pos_error(3), q(3), dq(3), prev_action(3)]`; the passive
 wrist is commanded to its mechanical coupling every step.
+
+## 4. Evaluating trained policies (Experiment 5)
+
+`eval_accuracy.py --dump` runs a held-out evaluation (1024 FK-sampled targets, fixed
+seed, deterministic actions) and saves per-episode error, target and success to an
+`.npz`. `make_exp5_results.py` turns the Reach and Insert dumps into the report tables
+and figures without Isaac. The exact commands and checkpoints are in
+[`EXP5_RUNBOOK.md`](EXP5_RUNBOOK.md). Design details for all three tasks (rewards,
+curriculum, PPO settings) are in
+[`MaxArm_RL_Technical_Reference.md`](MaxArm_RL_Technical_Reference.md).
 
 ## What's verified vs not
 
