@@ -1,0 +1,185 @@
+% Paste this file after the Task subsection in the System Design section.
+% It uses packages already loaded by main.tex: amsmath, graphicx, booktabs,
+% array, xcolor, float, tikz, and hyperref.
+
+% ---- software architecture diagram styles ----
+\definecolor{cproc}{RGB}{225,235,250}
+\definecolor{cnode}{RGB}{223,242,228}
+\definecolor{ctopic}{RGB}{253,240,221}
+\definecolor{cdata}{RGB}{238,238,242}
+\definecolor{clayer}{RGB}{244,247,252}
+\tikzset{
+  box/.style   ={draw=blue!40, rounded corners=2pt, align=center, font=\small,
+                 inner sep=4pt, minimum height=8mm, fill=cproc},
+  proc/.style  ={box},
+  data/.style  ={draw=gray!55, align=center, font=\small, inner sep=4pt,
+                 minimum height=7mm, fill=cdata, rounded corners=1pt},
+  rnode/.style ={draw=green!45!black, rounded corners=8pt, align=center,
+                 font=\footnotesize, inner sep=4pt, minimum height=7mm, fill=cnode},
+  topic/.style ={draw=orange!60!black, align=center, font=\scriptsize,
+                 inner sep=3pt, minimum height=5.5mm, fill=ctopic, rounded corners=1pt},
+  state/.style ={draw=blue!50, rounded corners=5pt, align=center, font=\small,
+                 inner sep=4pt, minimum height=8mm, fill=cproc},
+  layer/.style ={draw=blue!35, rounded corners=3pt, inner sep=7pt, fill=clayer},
+  arr/.style   ={-{Latex[length=2.2mm]}, semithick, blue!55!black},
+  darr/.style  ={-{Latex[length=2.2mm]}, semithick, dashed, gray!60!black},
+  lbl/.style   ={font=\scriptsize, fill=white, inner sep=1.5pt},
+}
+
+\subsection{Software Architecture and System Integration}\label{sec:software_architecture}
+
+The mechanical and electrical chapters established a robot that can move and be commanded; this chapter describes the software that decides \emph{what} to command. From a single RGB-D camera, a low-cost mobile base, and a microcontroller-driven arm, the system must build a map of a room it has never seen, locate itself within that map while moving, drive to a charging station, find the socket on the wall, bring a 3-DoF arm to it, and insert a plug. The software architecture is what turns that collection of devices into one autonomous agent. The chapter is organized by data flow: each layer is introduced through the information it consumes and produces, because the interfaces between modules are what make the system comprehensible and testable, and only then are the algorithms described. Every mathematical model is tied to the concrete signal it operates on inside the robot.
+
+\subsubsection{Software Architecture Overview}\label{sec:overview}
+
+The software is organized as six layers, each depending only on the interfaces exposed by the layer beneath it. The layering bounds the dependencies of every module, so that a change in the camera driver cannot ripple into the mission logic, and it lets each layer be validated in isolation (Section~\ref{sec:validation}) before the full pipeline is closed. From the bottom up, the \emph{Hardware Abstraction Layer} hides the electrical interfaces behind ROS~2 topics and services. The \emph{Sensor and Perception Layer} converts raw images into synchronized, calibrated streams. The \emph{Localization and Mapping Layer} turns those streams into a real-time pose estimate (dynamic visual SLAM) and a reconstructed volumetric model of the environment (nvblox). The \emph{Navigation Layer} (Nav2) plans and executes collision-free motion of the base toward a goal. The \emph{Manipulation Layer} drives the arm to a target socket pose. The \emph{Mission Management Layer} sequences the whole charging operation as a finite-state machine and supervises failure recovery.
+
+The independence is concrete: the base controller on the Pi consumes \texttt{/cmd\_vel} and returns wheel odometry; the arm controller consumes joint targets and returns joint states; neither knows how those messages were produced. This is what allows the navigation stack to be developed and tested entirely on the laptop, with the Pi bridges substituted by simulated equivalents, before the physical base is attached.
+
+\subsubsection{Hardware Abstraction Layer}\label{sec:hal}
+
+The Hardware Abstraction Layer (HAL) is the boundary at which physical signals become ROS~2 messages; no module above it touches a USB endpoint, serial port, or pulse train directly. The \textbf{Intel RealSense D435i} is driven by the \texttt{realsense2\_camera} node, which wraps the \texttt{librealsense2} SDK and the kernel UVC stack; it publishes the rectified infrared pair at $848\times480$ for visual odometry, the aligned depth and color at $1280\times720$ for mapping, and the IMU stream, all over USB~3.0. The \textbf{ESP32} arm microcontroller runs a micro-ROS client and joins the network through the \texttt{micro\_ros\_agent}, which bridges its serial link (115200~baud) into DDS. The \textbf{TETRIX PRIZM controller} on the Pi is exposed by the \texttt{prizm\_interface} node, which accepts \texttt{/cmd\_vel} and returns wheel odometry. The \textbf{TorqueNADO motors} are not addressed individually: PRIZM closes their current and velocity loops in firmware and accepts wheel-velocity setpoints, and the \textbf{wheel encoders} it reads surface as the published odometry. The \textbf{arm servos} are Hiwonder serial-bus servos whose position loops run inside the servos themselves; the ESP32 issues bus packets, and the host converts joint angles to servo pulses. The firmware details of both the PRIZM and the servo bus are given in the electrical-design subsection.
+
+Two design principles run through the HAL. Device \emph{drivers} own the protocol and timing of each device, while thin \emph{ROS wrappers} expose it as typed messages. And the wheel kinematics that convert a commanded body twist $(v,\omega)$ into left and right wheel speeds,
+$$
+\omega_L=\frac{v-\tfrac{b}{2}\,\omega}{r_w},\qquad
+\omega_R=\frac{v+\tfrac{b}{2}\,\omega}{r_w},
+$$
+with wheel radius $r_w$ and track width $b$ (Section~\ref{meth:sec:dyn}), live in the HAL, so everything above it commands the robot in physical units rather than motor counts.
+
+\subsubsection{Perception Layer}\label{sec:perception}
+
+Raw image and depth frames are not yet usable for geometry. The perception pipeline acquires the RGB and depth images, synchronizes them in time, registers depth into the color frame, and produces the calibrated, time-synchronized RGB-D stream that localization and mapping consume.
+
+Time synchronization matters because the depth image is triangulated from the left and right infrared frames: if the two are captured at different instants, motion corrupts the apparent disparity and the recovered depth. The driver therefore hardware-timestamps each frame, and the pipeline associates only frames whose stamps fall within a tight window. Depth-to-color registration reprojects each depth pixel into the color camera, so that a color pixel and its metric depth refer to the same scene point.
+
+The geometric core of the layer is the pinhole camera model, which relates a 3-D point in the camera frame to its pixel by dividing by depth (so distant objects subtend fewer pixels) through the focal lengths and principal point---the four \emph{intrinsic parameters}, delivered to every node on the \texttt{camera\_info} topic. Inverting the model back-projects a depth pixel of measured range into a metric 3-D point for mapping, and the \emph{extrinsic} rigid transform $T_{\text{cam}}^{\text{base}}\in SE(3)$ places the camera on the robot; lens distortion is removed before projection so the linear model holds. The projection, back-projection, and intrinsic/extrinsic definitions are derived in Section~\ref{meth:sec:perception} (Eqs.~\eqref{meth:eq:projection}--\eqref{meth:eq:backproj}).
+
+These transforms are organized by the \textbf{TF tree}, the system's single source of truth for spatial relationships. The dynamic visual SLAM backend publishes the \texttt{map}$\to$\texttt{odom} edge, while the \texttt{prizm\_interface} node publishes \texttt{odom}$\to$\texttt{base\_link} from wheel odometry; the full transform algebra is given in Section~\ref{meth:sec:perception}.
+
+Every measurement in the robot --- a detected socket pixel, a mapped voxel, a planned waypoint --- is ultimately a query on this tree of chained homogeneous transforms.
+
+\subsubsection{Localization Layer}\label{sec:localization}
+
+Localization is provided by a custom \textbf{dynamic visual SLAM} pipeline (Section~\ref{meth:sec:slam}), a GPU-accelerated estimator that consumes the registered RGB-D stream together with the IMU and a wheel-odometry prior. Its backend publishes the \texttt{map}$\to$\texttt{odom} transform and an odometry message on \texttt{/visual\_slam/tracking/odometry}, on which the mapper and navigator both depend; the \texttt{odom}$\to$\texttt{base\_link} edge is supplied separately by the wheel-odometry bridge. On this hardware it tracks at the full 30\,Hz of the camera, with a GPU pose-update time of about 0.5\,ms.
+
+Internally, the pipeline follows the standard visual-SLAM sequence: it detects and matches features, recovers the camera pose from the 3-D landmarks and their 2-D observations by solving the Perspective-$n$-Point (PnP) problem, rejects wrong correspondences with RANSAC, and then refines pose and landmarks together by sliding-window bundle adjustment that minimizes the reprojection error under a robust loss. Poses are elements of $SE(3)$, with the rotation transmitted as a unit quaternion that avoids gimbal lock; composing them is the chained matrix multiplication that the TF tree of Section~\ref{sec:perception} performs. The reprojection-error, PnP, bundle-adjustment, $SE(3)$, and RANSAC formulations are derived in Section~\ref{meth:sec:slam}.
+
+\subsubsection{Mapping Layer}\label{sec:mapping}
+
+While the dynamic visual SLAM answers \emph{where am I}, \textbf{nvblox} answers \emph{what is around me}. It fuses the registered depth frames into a volumetric model in the \texttt{odom} frame and exports the obstacle map the navigator needs: a colored surface mesh at roughly 14\,Hz and a 2-D distance slice for navigation at 10\,Hz.
+
+The model is a \textbf{truncated signed distance field (TSDF)}: space is divided into voxels, each storing the signed distance from its center to the nearest measured surface (negative behind, positive in front), truncated to a band $\pm\tau$. Each depth frame updates the voxels by confidence-weighted averaging, so many noisy single-frame measurements converge to one stable estimate and spurious readings are averaged away; a voxel seen many times becomes firm, while one far from the camera or deep behind the truncation band, where depth noise grows, carries little weight. The visible surface is the zero-crossing $D(v)=0$, extracted as a mesh by marching cubes.
+
+For planning, the TSDF is converted into a \textbf{Euclidean signed distance field (ESDF)}, in which every voxel stores the true Euclidean distance to the nearest obstacle, so its value is the clearance and its gradient $\nabla E$ points away from the nearest obstacle---exactly what a planner needs to know how far the robot can move before a collision and in which direction clearance increases. nvblox exports a horizontal slice in a band above the floor ($0.10$--$0.60$\,m) as the 2-D cost layer Nav2 consumes; because the system maps dynamic scenes, this slice is published as a \emph{combined} static-plus-dynamic map, so moving obstacles appear and then clear once they leave. The TSDF fusion update and the ESDF distance transform are given in Section~\ref{meth:sec:nvblox}.
+
+\subsubsection{Navigation Layer}\label{sec:navigation}
+
+\textbf{Nav2} plans and executes the motion of the base. It takes a goal pose, the robot's current pose, and the obstacle map, computes a path, and tracks it by emitting velocity commands, while a behavior tree supervises and triggers recovery. In this system Nav2 is configured \emph{without} a static map server and \emph{without} AMCL: the dynamic visual SLAM and the wheel-odometry bridge already supply the full \texttt{map}$\to$\texttt{odom}$\to$\texttt{base\_link} transform chain, and nvblox already supplies the obstacle costmap, so Nav2 consumes those products directly.
+
+The \textbf{global planner} searches the global costmap for a complete collision-free path. The \textbf{local planner} (controller server) tracks that path over a short horizon, reacting to unforeseen obstacles, and produces the body twist. The \textbf{behavior-tree navigator} encodes the plan-then-follow-else-recover logic as an inspectable tree, and the \textbf{recovery server} provides corrective behaviors (spin, back up, wait). Finally, the \textbf{velocity smoother} limits the acceleration of the commanded twist before it reaches the motors.
+
+The motion model is the \textbf{differential-drive (unicycle) kinematics}: the base can only move along its current heading and rotate about its center, the nonholonomic constraint every Nav2 controller must respect, which is why the local planner reasons in $(v,\omega)$ rather than in free Cartesian velocity. The PRIZM wheel odometry integrates this model from wheel speeds, and the dynamic visual SLAM corrects its drift. \textbf{Path tracking} chooses $(v,\omega)$ so the predicted trajectory stays on the global path while remaining in free space: the controller rolls out candidate command sequences, scores each by distance to the path and clearance read from the costmap, and applies the best, binding the costmap, the kinematic model, and the command into one optimization. The \textbf{costmaps} are the inflated obstacle grids derived from the nvblox slice, each obstacle cell expanded by the robot radius plus a decaying margin so the planners can treat the robot as a point. The unicycle kinematics and their discrete odometry integration are stated in Section~\ref{meth:sec:nav}.
+
+\subsubsection{Socket Detection and Pose Estimation}\label{sec:socket}
+
+Once the base reaches the charging station, perception narrows from locating the station to locating the socket on it. Socket perception is staged. A coarse estimate from the base-mounted RealSense detects the socket and, using its depth and the camera-to-base extrinsics, places the socket's six-degree-of-freedom pose in the base frame to guide the final approach and base repositioning. A fine estimate from the eye-in-hand camera then drives the close-range alignment and insertion.
+
+The coarse detection combines a classical color-segmentation routine, which exploits the high-contrast geometry of the socket face, with a learned CenterPose keypoint detector, which regresses the socket's projected bounding cuboid. Both yield image-plane locations; their depth is read from the registered depth frame, and the camera model of Section~\ref{sec:perception} converts them into the socket pose in the camera frame.
+
+The output the manipulation layer needs is the socket pose in the \emph{robot} frame, obtained by \textbf{transformation composition} along the TF tree:
+$$
+T^{\text{base}}_{\text{socket}} = T^{\text{base}}_{\text{cam}}\;T^{\text{cam}}_{\text{socket}}.
+$$
+Because the camera is mounted on the arm's end-effector, $T^{\text{base}}_{\text{cam}}$ is itself a function of the current joint angles through the forward kinematics of the mechanical-design subsection, so the full \textbf{coordinate conversion} is
+$$
+T^{\text{base}}_{\text{socket}} = T^{\text{base}}_{\text{ee}}(\boldsymbol{\theta})\;T^{\text{ee}}_{\text{cam}}\;T^{\text{cam}}_{\text{socket}},
+$$
+chaining the FK transform, the rigid eye-in-hand offset, and the measurement. \textbf{Error propagation} through this chain sets the achievable insertion accuracy: if the camera-frame pose has covariance $\Sigma_{\text{cam}}$, the base-frame covariance is, to first order,
+$$
+\Sigma_{\text{base}} = J\,\Sigma_{\text{cam}}\,J^\top,\qquad J=\frac{\partial T^{\text{base}}_{\text{socket}}}{\partial T^{\text{cam}}_{\text{socket}}},
+$$
+so a rotational error in the mount or a depth error in the measurement is amplified by the lever arm of the arm. This is precisely why the eye-in-hand camera performs the \emph{final} alignment from close range, where $\Sigma_{\text{cam}}$ is smallest; at that range the endgame uses the lighter two-hole bearing (image-based visual servoing) representation rather than a full 6-DoF pose, as detailed in Section~\ref{meth:sec:manip:vision}.
+
+\subsubsection{Manipulation Layer}\label{sec:manipulation}
+
+The manipulation layer converts a target socket pose into physical motion of the arm: it solves the inverse kinematics for the joint angles that bring the plug to a pre-insert pose at the socket, generates a smooth trajectory, and streams it to the ESP32. The learned policy of Section~\ref{sec:rl} then performs the final alignment and insertion.
+
+The kinematic models were derived in the Mechanical chapter and are reused unchanged here in their software role. \textbf{Forward kinematics} (Section~\ref{sec:fk}) predicts where the plug currently is from the joint angles. \textbf{Inverse kinematics} (Section~\ref{sec:ik}) is what the socket pose triggers: it returns the base yaw and the shoulder and elbow angles for the target, with the elbow-up branch chosen for clearance. The \textbf{Jacobian} (Section~\ref{sec:jac}) relates joint rates to plug velocity and, through its determinant, warns of the near-straight-elbow singularities, keeping the approach well-conditioned. \textbf{Workspace constraints}---the reachable shell $|L_2-L_3|\le D\le L_2+L_3$---are checked before motion, so an unreachable socket is rejected rather than attempted.
+
+\textbf{Trajectory generation} turns the single IK target into a time-parameterized path, interpolating each joint from $\theta(0)$ to $\theta(T)$ with a \textbf{minimum-jerk} profile,
+$$
+\theta(t)=\theta(0)+\big(\theta(T)-\theta(0)\big)\big(10s^3-15s^4+6s^5\big),\qquad s=t/T,
+$$
+whose zero velocity and acceleration at both endpoints give a smooth start and stop the servos can follow without overshoot. This \textbf{joint-space planning} is appropriate because the task is to reach a pose, not to follow a Cartesian contour, and joint-space interpolation is both cheaper and free of the singularities a straight-line Cartesian path can cross. The waypoints are streamed to the ESP32 over micro-ROS, converted to servo pulses by the host affine calibration of the electrical-design subsection, and executed by the servos' internal loops, with returned joint states closing the loop.
+
+\subsubsection{Reinforcement-Learning Layer}\label{sec:rl}
+
+The geometric pipeline aligns the plug to the \emph{estimated} socket pose, but the final millimeters are limited by residual estimation error and the unmodeled contact between plug and socket. The reinforcement-learning layer closes this residual with a policy that observes the alignment error and outputs small joint corrections, learned in simulation and transferred to the real arm. The implemented algorithm is \textbf{Proximal Policy Optimization (PPO)}, which performs the final alignment and insertion (Section~\ref{meth:sec:manip:rl}). \textbf{Soft Actor-Critic (SAC)}, an off-policy actor-critic method whose entropy regularization makes it sample-efficient for continuous control, is a planned future refinement for the contact-rich insertion phase; SAC is retained as a future alternative rather than part of the implemented controller.
+
+The \textbf{observation} is assembled from quantities the rest of the stack already produces---the socket-pose (alignment) error, the end-effector pose, and the joint angles and velocities,
+$$
+\mathbf{s}=\big[\,\mathbf{e}_{\text{socket}},\;\mathbf{p}_{\text{ee}},\;\boldsymbol{\theta},\;\dot{\boldsymbol{\theta}}\,\big].
+$$
+The deployed PPO actor uses the same kind of state---hole bearings in place of the explicit pose error, together with the joint angles, velocities, and previous action (Section~\ref{meth:sec:manip:rl}). The \textbf{actions} are bounded joint-position corrections $\mathbf{a}=\Delta\boldsymbol{\theta}$ added on top of the geometric setpoint, so the policy refines rather than replaces the analytic controller and exploration stays safe. The \textbf{reward} rewards alignment and successful insertion while penalizing collision,
+$$
+r=-w_a\lVert \mathbf{e}_{\text{align}}\rVert + w_s\,\mathbf{1}[\text{inserted}] - w_c\,c_{\text{collision}},
+$$
+with a dense distance term, a sparse seating bonus, and a contact-force penalty. In the planned SAC variant the policy would instead maximize the \textbf{entropy-regularized return}
+$$
+J(\pi)=\sum_t \mathrm{E}_{(\mathbf{s}_t,\mathbf{a}_t)\sim\pi}\!\big[\,r(\mathbf{s}_t,\mathbf{a}_t)+\alpha\,\mathcal{H}\big(\pi(\cdot\mid\mathbf{s}_t)\big)\big],
+$$
+where the temperature $\alpha$ balances exploration against exploitation. A future SAC implementation would use twin critics fitted to a Bellman target and a \textbf{replay buffer} that reuses past transitions.
+
+Because the policy is trained in Isaac Sim and deployed on hardware, it must cross the reality gap. \textbf{Domain randomization} varies the simulator's parameters --- socket pose, friction, lighting, latency, sensor noise --- across episodes, so the policy learns a behavior robust to the very quantities that differ between simulation and the real cell rather than overfitting to one nominal model. \textbf{Sim-to-real transfer} is then deployment of that robustified policy on the physical arm with no change of weights, observing the real state through the same interfaces and acting through the same ESP32 path.
+
+\subsubsection{Mission Management Layer}\label{sec:mission}
+
+The autonomous charging operation is sequenced by a \textbf{finite-state machine (FSM)}: the mission is a chain of distinct phases, each with a clear success condition and a defined response to failure, and an explicit state machine keeps the robot's behavior auditable. This mission-level FSM is distinct from the finer insertion-sequence FSM of Section~\ref{meth:sec:manip:fsm}.
+
+The \textbf{data exchanged} between modules is typed and minimal: the dynamic visual SLAM passes a transform and an odometry message, not images; nvblox passes a 2-D cost slice, not its voxel grid; the socket subsystem passes a single pose; and the IK solver passes a joint-target array. Keeping inter-module messages small bounds the DDS bandwidth and makes each interface easy to record and replay. The \textbf{timing requirements} follow the physical rates of the sensors and actuators. The camera fixes the 30\,Hz ceiling; the SLAM front end and the depth stream feed nvblox at camera rate; the ESDF slice and the Nav2 control loop run at 10\,Hz; and the arm trajectory streams at the servo update rate. The \textbf{synchronization requirements} are strongest at the front of the pipeline, where the infrared pair must be time-aligned for valid depth and depth must be registered to color for valid mapping. They relax toward the back, where the arm reacts to a pose that changes slowly once the base has stopped. The architecture exploits this gradient: tightly synchronized, high-rate perception runs on the GPU laptop with shared-memory transport, while the looser, lower-rate base and arm commands tolerate the small latency of the Wi-Fi and serial links.
+
+
+\subsubsection{Timing and Computational Analysis}\label{sec:timing}
+
+The system is a soft-real-time pipeline whose rates are set by its sensors and consumers (Table~\ref{tab:timing}).
+
+\begin{table}[H]\centering
+\caption{Pipeline rates and resources.}\label{tab:timing}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Stage & Rate / latency & Resource\\\midrule
+Camera RGB & 30\,fps (1280$\times$720) & USB 3.0\\
+Camera depth & 30\,fps (1280$\times$720) & USB 3.0\\
+Stereo IR (depth input) & 30\,fps (848$\times$480) & USB 3.0\\
+Dynamic visual SLAM pose update & 30\,Hz, $\sim$0.5\,ms GPU & GPU\\
+nvblox mesh & $\sim$14\,Hz & GPU\\
+nvblox ESDF slice & 10\,Hz & GPU\\
+Nav2 control loop / \texttt{cmd\_vel} & 10\,Hz & CPU\\
+Arm trajectory stream & servo update rate & ESP32 serial\\
+Base command link & \texttt{cmd\_vel} over Wi-Fi & Wi-Fi\\
+Arm command link & micro-ROS over serial 115200 & USB serial\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The sensor rate caps everything upstream: nothing localization or mapping does can exceed the 30\,Hz camera rate, so the SLAM front end's sub-millisecond GPU time sits comfortably within budget and the limiting factor is image acquisition, not computation. Localization and mapping are GPU-bound and share one device; nvblox runs its mesh and ESDF below the SLAM rate because volumetric integration is heavier and the map need not refresh every frame for a slowly moving base. The navigation loop at 10\,Hz is the standard compromise between responsiveness and per-cycle planning cost, and it sets the rate at which \texttt{/cmd\_vel} reaches the base. The arm rate is governed by the servos' own loops, and the communication latency is dominated by the two serial links and the Wi-Fi hop, all small relative to the 100\,ms navigation period.
+
+The computational load concentrates on the GPU: the dynamic visual SLAM and nvblox both run as CUDA workloads on the laptop's RTX-class GPU, which is why the architecture places all perception on one machine. GPU utilization is dominated by nvblox's voxel integration, while the SLAM footprint is small. CPU utilization is spread across the Nav2 servers, the ROS~2 executors, and the DDS transport, none individually heavy. Memory is dominated by the nvblox voxel grid, which grows with mapped volume and resolution, which is why the ESDF is sliced to a thin band rather than queried in full. Real-time behavior is achieved not by hard scheduling but by QoS and rate design: best-effort image and costmap streams drop rather than queue, high-rate perception is isolated on the GPU host with shared-memory transport, and the lower-rate command paths tolerate the network latency, so the system degrades gracefully under load instead of accumulating delay.
+
+\subsubsection{Software Validation}\label{sec:validation}
+
+The layered architecture was exploited directly for validation: each subsystem was verified against a measurable criterion \emph{before} the full pipeline was closed, so an integration fault could be attributed to a specific interface rather than to the system as a whole.
+
+\textbf{Perception validation} confirmed that the camera streams were synchronized and registered. The stereo pair was checked for matched timestamps and rectified epipolar geometry (zero vertical disparity on known correspondences), and depth-to-color registration was checked by projecting a known object's depth into color. \textbf{SLAM validation} measured the dynamic visual SLAM against the two standard trajectory metrics, the \textbf{Absolute Trajectory Error (ATE)},
+$$
+\mathrm{ATE}=\sqrt{\frac{1}{N}\sum_{i=1}^{N}\big\lVert \mathbf{t}_i^{\text{est}}-\mathbf{t}_i^{\text{ref}}\big\rVert^2},
+$$
+and the \textbf{Relative Pose Error (RPE)} over a fixed interval $\Delta$,
+$$
+\mathrm{RPE}=\sqrt{\frac{1}{M}\sum_{i}\big\lVert \operatorname{log}\!\big((T_{i}^{-1}T_{i+\Delta})^{\text{ref},-1}(T_{i}^{-1}T_{i+\Delta})^{\text{est}}\big)\big\rVert^2}\,,
+$$
+together with the \textbf{tracking rate}, the fraction of frames in which the estimator reported a valid pose. ATE captures global consistency, RPE the local smoothness that matters for control, and the tracking rate robustness to texture-poor or fast motion.
+
+\textbf{Mapping validation} compared the reconstructed mesh against the known test geometry and confirmed that moving obstacles entered the \emph{combined} map slice and then cleared after leaving. \textbf{Navigation validation} confirmed that the full Nav2 stack reached lifecycle-active, that all servers loaded the nvblox cost layer, and that a goal produced a collision-free global path and a tracked \texttt{/cmd\_vel}, with recovery behaviors firing on induced failures. \textbf{Manipulation validation} verified the FK/IK chain to numerical precision against the reference implementation and confirmed that commanded joint targets were reached and executed on the servos. \textbf{Integration validation} then ran the assembled pipeline end to end and measured the figures that matter to the user: the insertion \textbf{success rate} over repeated trials and the end-to-end \textbf{latency} from socket detection to plug seating, both revisited with the reinforcement-learning evaluation.

@@ -1,0 +1,511 @@
+% Paste this file as a separate top-level section after Methodology.
+% It was converted from the standalone reinforcement-learning training chapter.
+% No document class, preamble, or bibliography command is included.
+
+\begingroup
+
+% The main report does not load siunitx, natbib, or amssymb. These local
+% definitions preserve the original notation without changing the report preamble.
+\providecommand{\SI}[2]{#1~#2}
+\providecommand{\num}[1]{#1}
+\providecommand{\numrange}[2]{#1--#2}
+\providecommand{\ang}[1]{\ensuremath{#1^{\circ}}}
+\providecommand{\si}[1]{#1}
+\providecommand{\mathbb}[1]{\mathbf{#1}}
+\providecommand{\milli}{m}
+\providecommand{\centi}{c}
+\providecommand{\meter}{m}
+\providecommand{\second}{s}
+\providecommand{\hertz}{Hz}
+\providecommand{\newton}{N\,}
+\providecommand{\radian}{rad}
+\providecommand{\degree}{\ensuremath{^{\circ}}}
+\providecommand{\per}{/}
+\providecommand{\percent}{\%}
+
+% The original diagrams are external PNG files. A labelled placeholder is used
+% only when a corresponding image has not yet been copied into figures/.
+\newcommand{\rlincludegraphics}[2][]{%
+  \IfFileExists{#2}{\includegraphics[#1]{#2}}{%
+    \fbox{\parbox[c][2.65cm][c]{0.82\textwidth}{\centering\footnotesize
+      \textbf{IMAGE PLACEHOLDER}\\[0.35em]
+      Copy the required reinforcement-learning diagram to\\[-0.05em]
+      \texttt{\detokenize{#2}}}}%
+  }%
+}
+\providecommand{\rlFloatBarrier}{\par\medskip}
+
+% Keep equations in this section grouped under its top-level section number.
+\setcounter{equation}{0}
+\renewcommand{\theequation}{\thesection.\arabic{equation}}
+
+
+\section{Simulation Environment and Reinforcement-Learning Training Workflow}\label{rl:ch:rl}
+
+The deterministic software stack brings the mobile base to the charging station and places the manipulator within its reachable working region. Reinforcement learning is introduced only for the final alignment and insertion stage, where small geometric errors and contact effects make a purely scripted controller unreliable.
+
+This section defines the simulation model, task interfaces, reward, PPO update, transfer measures, and validation plan. The presentation moves in the same order as the implementation: model the robot, define the task, train the policy, evaluate it, and deploy the resulting controller.
+
+\subsection{Training Workflow Overview}\label{rl:sec:rl-overview}
+
+The learned policy is inserted into the existing motion path rather than added as a parallel controller. Localization, navigation, and nominal arm placement remain deterministic. Once the plug is close to the socket, the learned policy reads the same state variables and writes the same joint-target command used by the scripted controller. Thus, the hardware-facing stages remain unchanged:
+\begin{equation*}
+\begin{aligned}
+\text{CAD/URDF}\ &\longrightarrow\ \text{Isaac Sim worlds}\ \longrightarrow\ \text{PPO rollouts}\\
+&\longrightarrow\ \text{policy evaluation}\ \longrightarrow\ \text{ROS~2 joint targets}.
+\end{aligned}
+\end{equation*}
+
+This division matches the physical structure of the task. Base motion is a geometric navigation problem with a map, localization estimate, and collision-free path. Insertion is different: a radial clearance of approximately \SI{3}{\milli\meter} is comparable to servo repeatability and smaller than the residual pose uncertainty from vision and odometry. Small errors can therefore produce contact, wedging, or jamming, while friction and compliance are not fully known \cite{whitney_1982_quasistatic,xu_2019_pegsurvey}. A feedback policy is used only where this uncertainty matters \cite{johannink_2019_residual,schoettler_2020_industrial,tang_2023_industreal}.
+
+The policy acts on a compact state and action interface,
+\begin{equation*}
+\bm{s}_t\in\mathbb{R}^{12},\qquad \bm{a}_t\in[-1,1]^3,\qquad
+\bm{q}^{\mathrm{tgt}}_t=\mathcal{A}(\bm{s}_t,\bm{a}_t),
+\end{equation*}
+where $\mathcal{A}$ is the joint-target mapping defined in Section~\ref{rl:sec:rl-act}. The simulator reproduces this interface, including the control rate and joint limits. Consequently, replacing the final scripted stage with the trained actor does not require a different servo bus, firmware map, or ROS~2 message path.
+
+The task family separates development stages without changing the central interface. The alignment prototype validates Cartesian control and safety logic. The reach task validates the joint-space learning loop. The insertion task tracks the plug tip and is the main state-based experiment, while the vision variant replaces privileged target position with camera features for deployment.
+
+\begin{table}[!ht]
+\centering
+\caption{The four registered reinforcement-learning tasks. The state-based tasks share a $12$-dimensional observation and a three-dimensional action; \texttt{VisionInsert} uses an asymmetric actor--critic in which the camera-only actor observes $15$ dimensions while the privileged critic retains the $12$-dimensional ground-truth state.}
+\label{rl:tab:rl-tasks}
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}llllcl@{}}
+\toprule
+Task (environment id) & Track point & Action & Obs.\ dim & Horizon / envs & Role \\
+\midrule
+\texttt{MaxArm-Charger-Align-v0} & Wrist EE origin & Cartesian $\Delta$ + DLS-IK & $12$    & \SI{6}{\second} / $256$  & Debug / stability \\
+\texttt{NewArm-Reach-v0}         & Wrist EE origin & $3$ joint deltas          & $12$    & \SI{5}{\second} / $1024$ & Base training machinery \\
+\texttt{NewArm-Insert-v0}        & Plug tip        & $3$ joint deltas          & $12$    & \SI{6}{\second} / $1024$ & \textbf{Primary insertion task} \\
+\texttt{NewArm-VisionInsert-v0}  & Plug tip        & $3$ joint deltas          & $15/12$ & \SI{6}{\second} / $1024$ & Camera-only deployable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The reduction from a nominal six-degree-of-freedom insertion problem to position control follows from the mechanism itself. The passive wrist maintains the plug orientation through
+\begin{equation*}
+q_4=\tfrac{3\pi}{2}-q_2-q_3 .
+\end{equation*}
+For a target sampled from feasible joint coordinates, the plug is already axially aligned. With $\bm{p}_{\mathrm{tip}}$ denoting the plug-tip position and $\bm{p}^{\star}$ the socket center, insertion is therefore expressed through the position error
+\begin{equation*}
+\bm{e}_p=\bm{p}^{\star}-\bm{p}_{\mathrm{tip}},\qquad d=\lVert\bm{e}_p\rVert .
+\end{equation*}
+Driving $d$ to zero closes the remaining translational alignment error; no independent orientation channel is needed for the state-based tasks.
+
+\rlFloatBarrier
+
+\subsection{Isaac Sim Digital Twin}\label{rl:sec:rl-twin}
+
+The digital twin starts from the URDF exported from the mechanical model. Isaac Sim imports the link graph as a reduced-coordinate USD articulation, preserving link mass, center of mass, inertia, joint axes, and limits. The three actuated coordinates are the base yaw $q_1$, shoulder pitch $q_2$, and elbow pitch $q_3$; the passive wrist is reconstructed from the coupling above. The root is fixed because base placement has already been solved by navigation, and self-collision is disabled because the permitted three-link workspace does not create self-contact.
+
+The plug and socket retain collision geometry and material properties, so a poor approach generates contact rather than interpenetration. The model does not assume force sensing. Safety is instead represented by geometric conditions: a faceplate-crossing check, a joint-limit margin, and, in the Cartesian prototype, an inverse-kinematics validity condition. This reflects the real hardware, which has position-controlled serial servos but no force/torque sensor.
+
+PhysX runs at $f_{\mathrm{phys}}=\SI{120}{\hertz}$ and holds each action for $D=4$ substeps. Hence,
+\begin{equation*}
+f_{\mathrm{ctrl}}=\frac{f_{\mathrm{phys}}}{D}=\SI{30}{\hertz},\qquad
+\tau=k_p\big(q^{\mathrm{tgt}}-q\big)-k_d\dot q,
+\end{equation*}
+with implicit position drives using $k_p=\SI{5000}{\newton\meter\per\radian}$, $k_d=\SI{150}{\newton\meter\second\per\radian}$, a \SI{100}{\newton\meter} effort limit, a \SI{20}{\radian\per\second} velocity limit, and a $0.95$ soft joint-limit factor. The policy therefore learns position targets, which is the same command abstraction accepted by the Hiwonder serial-bus servos.
+
+\begin{table}[!ht]
+\centering
+\caption{Digital-twin settings that determine the simulated command interface and contact behavior.}
+\label{rl:tab:rl-twin-settings}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component & Configuration used for training \\
+\midrule
+Articulation & Reduced coordinates; root fixed; three actuated joints \\
+Passive wrist & $q_4=3\pi/2-q_2-q_3$ reconstructed at every step \\
+Collision model & Plug/socket collision enabled; self-collision disabled \\
+Physics integration & PhysX TGS at \SI{120}{\hertz}; continuous collision detection \\
+Policy control & $D=4$ substeps per action; \SI{30}{\hertz} command rate \\
+Joint drive & Implicit PD position drive with effort and speed limits \\
+Safety abstraction & Wall-cross condition, joint margin, and IK-validity gate \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Isaac Sim and Isaac Lab are used because the training loop requires many environments to advance together on the GPU \cite{makoviychuk_2021_isaacgym}. In this implementation, Isaac Lab's \texttt{DirectRLEnv} provides replicated physics, batched buffers, and ROS~2 integration \cite{mittal_2023_orbit,rudin_2022_parallel}. The same platform also produces the wrist-camera images used by the vision task, avoiding a separate rendering pipeline.
+
+\rlFloatBarrier
+
+\subsection{Environment Generation}\label{rl:sec:rl-envgen}
+
+Each task is instantiated as $N$ copies of the same scene on a \SI{1.0}{\meter} grid. The arm, socket, plug, ground plane, and optional eye-in-hand camera are created once, then replicated with collision filtering between cells. The Cartesian prototype uses $N=256$ worlds because differential inverse kinematics is more expensive; the joint-space tasks use $N=1024$ worlds. A dome light and the fixed base produce a controlled initial scene, while the camera task additionally uses the mounted RGB sensor.
+
+The socket is a type-C/F proxy with two \SI{6.5}{\milli\meter}-radius receptacles spaced \SI{19}{\milli\meter} apart and recessed \SI{12}{\milli\meter}. The plug has matching \SI{3.5}{\milli\meter}-radius prongs and is rigidly attached to the end effector. Its tip lies $\ell_{\mathrm{plug}}=\SI{0.25}{\meter}$ ahead of the wrist. The socket yaw is set to $\psi=\operatorname{atan2}(p_y^{\star},p_x^{\star})$, which presents the aperture toward the radially pointing plug.
+
+Targets are not sampled uniformly in Cartesian space. A candidate joint vector is sampled first, then mapped through forward kinematics:
+\begin{equation*}
+\bm{q}\sim\mathcal{U}(\mathcal{Q}),\qquad
+\bm{p}^{\star}=\bm{p}_{\mathrm{tip}}(\bm{q}),\qquad
+r\in[\SI{0.12}{\meter},\SI{0.42}{\meter}],\quad z\in[\SI{0.06}{\meter},\SI{0.30}{\meter}].
+\end{equation*}
+This makes every accepted socket reachable and axially aligned by construction. Episodes begin from a fixed home posture, with zero joint velocity and cleared action buffers. Diversity is therefore introduced by the target distribution, while additional variations in lighting, friction, perception, and latency are handled separately by domain randomization.
+
+\begin{table}[!ht]
+\centering
+\caption{Geometric and sensing elements of one simulated charging scene.}
+\label{rl:tab:rl-scene}
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.26\textwidth}p{0.64\textwidth}@{}}
+\toprule
+Element & Training representation \\
+\midrule
+Socket & Type-C/F proxy; two \SI{6.5}{\milli\meter} holes, \SI{19}{\milli\meter} spacing, \SI{12}{\milli\meter} recess; yawed toward the arm base \\
+Plug & Rigid end-effector attachment; \SI{3.5}{\milli\meter}-radius prongs, matching \SI{19}{\milli\meter} spacing; tip offset $\ell_{\mathrm{plug}}=\SI{0.25}{\meter}$ \\
+Camera & RGB eye-in-hand sensor for the vision task; disabled for state-based headless tasks \\
+Target region & Reachable forward-kinematic samples filtered to $r\in[\SI{0.12}{\meter},\SI{0.42}{\meter}]$ and $z\in[\SI{0.06}{\meter},\SI{0.30}{\meter}]$ \\
+Reset state & Fixed home posture, zero joint velocity, zero previous action \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\rlFloatBarrier
+
+\subsection{Observation Space}\label{rl:sec:rl-obs}
+
+The state-based tasks use four three-dimensional blocks:
+\begin{equation}
+\label{rl:eq:rl-obs}
+\bm{s}_t=\big[\,\bm{e}_p;\ \bm{q};\ \dot{\bm{q}};\ \bm{a}_{t-1}\,\big]\in\mathbb{R}^{12}.
+\end{equation}
+The position error specifies the direction and distance to the target. Joint position and velocity identify the current mechanism configuration and its motion, while the previous action permits the network to suppress oscillation through the action-rate term of the reward. Orientation is omitted because it is determined by the wrist coupling and the feasible target sampler.
+
+The vision task replaces the privileged target error seen by the actor with two socket-hole observations. For each hole, the normalized image bearings are
+\begin{equation*}
+ n_x=\frac{x_c/z_d}{\tan(\mathrm{HFOV}/2)},\qquad
+ n_y=\frac{y_c/z_d}{\tan(\mathrm{VFOV}/2)},\qquad z_d=-z_c,
+\end{equation*}
+and its feature is masked when it is outside the camera frame. The actor therefore receives
+\begin{equation*}
+\bm{s}_t^{\mathrm{cam}}=\big[h_L(n_x,n_y,\mathrm{vis});\ h_R(n_x,n_y,\mathrm{vis});\ \bm{q};\ \dot{\bm{q}};\ \bm{a}_{t-1}\big]\in\mathbb{R}^{15}.
+\end{equation*}
+Bearing noise with $\sigma=0.012$ is added before masking. Zeroing an invisible feature prevents the policy from extrapolating a stale bearing and encourages it to move until the socket returns to view \cite{lin_2022_centerpose,schoettler_2020_industrial,spector_2021_insertionnet}.
+
+For training, the vision actor is paired with a privileged critic that retains the $12$-dimensional state in \eqref{rl:eq:rl-obs}. The critic is discarded after training, so hardware deployment remains camera-only. Empirical observation normalization is used only by the Cartesian align prototype. The joint-space tasks keep their inputs naturally comparable: position error is of order $10^{-1}$ m, joint angles are of order unity, velocities are bounded, and actions lie in $[-1,1]$.
+
+\rlFloatBarrier
+
+\subsection{Action Space}\label{rl:sec:rl-act}
+
+At each control step, the actor samples a normalized three-dimensional command,
+\begin{equation*}
+\bm{a}_t=\operatorname{clip}\!\big(\bm{\mu}_{\theta}(\bm{s}_t)+\bm{\epsilon}_t,-1,+1\big),
+\qquad \bm{\epsilon}_t\sim\mathcal{N}\!\big(\bm0,\operatorname{diag}(\bm{\sigma}^2)\big).
+\end{equation*}
+The same normalized action is used by two control maps. The primary reach, insert, and vision environments use direct joint increments. The earlier align environment uses Cartesian increments only to test a differential inverse-kinematics route before the final joint-space interface was adopted.
+
+\subsubsection{Joint-delta actuation for the reach, insert, and vision tasks}
+
+For $\bm{q}=(q_1,q_2,q_3)$, the action map is
+\begin{equation}
+\bm q^{\text{tgt}}_t = \operatorname{clip}\!\big(\bm q_t + \bm a_t\,\Delta q_{\max},-q_{\lim},+q_{\lim}\big),
+\qquad q_{\lim}=\pi .
+\label{rl:eq:rl-act-joint}
+\end{equation}
+The reach task uses $\Delta q_{\max}=\ang{6}$ per step. The insert and vision tasks use \ang{3}, halving the maximum local correction to improve final-centimeter control. At \SI{30}{\hertz}, the \ang{6} limit corresponds to \SI{3.14}{\radian\per\second}, below the \SI{20}{\radian\per\second} actuator limit. The passive wrist is recomputed from $q_4=3\pi/2-q_2-q_3$, so all policy outputs remain compatible with the mechanical leveling constraint.
+
+\subsubsection{Cartesian corrections with damped differential inverse kinematics for the align task}
+
+The prototype scales each action into a bounded Cartesian correction,
+\begin{equation}
+\Delta\bm p_t=\bm a_t\odot[\Delta x_{\max},\Delta y_{\max},\Delta z_{\max}]^{\top},
+\qquad \Delta x_{\max}=\Delta y_{\max}=\Delta z_{\max}=\SI{5}{\milli\meter}.
+\label{rl:eq:rl-act-cart}
+\end{equation}
+The correction is converted to a joint update by the damped least-squares solution
+\begin{equation}
+\Delta\bm q=\bm J^{\top}\big(\bm J\bm J^{\top}+\lambda_{\mathrm{dls}}^2\bm I\big)^{-1}\Delta\bm p_t,
+\qquad \lambda_{\mathrm{dls}}=5\times10^{-3}.
+\label{rl:eq:rl-dls}
+\end{equation}
+This is the minimizer of $\lVert\bm J\Delta\bm q-\Delta\bm p_t\rVert^2+\lambda_{\mathrm{dls}}^2\lVert\Delta\bm q\rVert^2$. The damping keeps the $3\times3$ task-space matrix invertible close to singular configurations \cite{wampler_1986_dls,nakamura_1986_singularity}.
+
+\rlFloatBarrier
+
+\subsection{Reward Function Engineering}\label{rl:sec:rl-reward}
+
+A terminal success flag alone provides too little information during early learning. The primary reach and insertion tasks therefore use a dense distance-based reward with a narrow terminal incentive:
+\begin{equation}
+\begin{aligned}
+R^{\text{ins}} &= w_r\!\left(1-\tanh\frac{d}{\sigma_r}\right)+w_f\!\left(1-\tanh\frac{d}{\sigma_f}\right)-w_d d \\
+&\quad-w_a\lVert\bm a_t-\bm a_{t-1}\rVert-w_v\lVert\dot{\bm q}\rVert
++w_b\mathbf1[d<d_s]+w_c e^{-(d/\sigma_c)^2}.
+\end{aligned}
+\label{rl:eq:rl-reward-insert}
+\end{equation}
+The coarse term guides motion across the workspace, while the fine attractor and Gaussian centering well shape the motion inside the socket neighborhood. The action-rate and velocity penalties suppress oscillation; the bullseye term gives an unambiguous terminal preference.
+
+\begin{table}[!ht]
+\centering
+\caption{Reward terms and weights for the joint-delta reach and insert tasks of
+\eqref{rl:eq:rl-reward-insert}. The insert task inherits the reach weights except where a sharpened
+value is listed; the sharper fine attractor, stronger centering well, and finer joint step move the
+optimum from the tolerance edge to dead centre.}
+\label{rl:tab:rl-reward}
+\begin{tabular}{@{}llcc@{}}
+\toprule
+Term & Expression & Reach & Insert \\
+\midrule
+Coarse attractor   & $w_r(1-\tanh(d/\sigma_r))$ & $w_r{=}1.0,\ \sigma_r{=}\SI{0.10}{\meter}$ & inherited \\
+Fine attractor     & $w_f(1-\tanh(d/\sigma_f))$ & $w_f{=}0.5,\ \sigma_f{=}\SI{0.02}{\meter}$ & $w_f{=}1.5,\ \sigma_f{=}\SI{8}{\milli\meter}$ \\
+Linear pull        & $-w_d\,d$ & $w_d{=}0.2$ & inherited \\
+Action rate        & $-w_a\lVert\bm a_t-\bm a_{t-1}\rVert$ & $w_a{=}0.002$ & inherited \\
+Joint speed        & $-w_v\lVert\dot{\bm q}\rVert$ & $w_v{=}0.001$ & inherited \\
+Bullseye bonus     & $w_b\,\mathbf 1[d<d_s]$ & $w_b{=}2.0,\ d_s{=}\SI{1}{\centi\meter}$ & $w_b{=}1.0$ \\
+Centering well     & $w_c\,e^{-(d/\sigma_c)^2}$ & $w_c{=}0$ & $w_c{=}5.0,\ \sigma_c{=}\SI{4}{\milli\meter}$ \\
+Step bound         & $\Delta q_{\max}$ & $\ang{6}$ & $\ang{3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Cartesian align prototype uses a separate reward because it also tests safety gates absent from the primary joint-delta task:
+\begin{equation}
+\begin{aligned}
+R^{\text{al}}={}&-w_p d+w_{cl}e^{-d/s_{cl}}-w_{ac}\lVert\bm a\rVert-w_{sm}\lVert\bm a-\bm a_{t-1}\rVert-w_{js}\lVert\dot{\bm q}\rVert\\
+&-w_{jl}\Phi_{\mathrm{lim}}(\bm q)-w_{wc}\mathbf1[\mathrm{wall}]-w_{ik}\mathbf1[\mathrm{IK\ invalid}]+w_{su}\mathbf1[\mathrm{success\!\!\!\!\text{-}hold}].
+\end{aligned}
+\label{rl:eq:rl-reward-align}
+\end{equation}
+Here $\Phi_{\mathrm{lim}}$ increases when a joint approaches its soft limit. The reward never substitutes for physical safety: hard position limits, wall-cross termination, and command clipping remain active. This prevents a policy from gaining reward by hovering at the tolerance boundary, using excessive velocity, or crossing the socket faceplate.
+
+\rlFloatBarrier
+
+\subsection{Proximal Policy Optimization}\label{rl:sec:rl-ppo}
+
+The policy is optimized to maximize expected discounted return,
+\begin{equation}
+J(\theta)=\mathbb{E}_{\tau\sim\pi_\theta}\!\left[\sum_{t=0}^{\infty}\gamma^t r_t\right],
+\label{rl:eq:rl-objective}
+\end{equation}
+with the policy-gradient estimator
+\begin{equation}
+\nabla_\theta J(\theta)=\mathbb{E}\!\left[\sum_t\nabla_\theta\log\pi_\theta(\bm a_t\mid\bm s_t)\,\hat A_t\right].
+\label{rl:eq:rl-pg}
+\end{equation}
+A state-value baseline reduces the variance of this update. Generalized advantage estimation forms the advantage from temporal-difference residuals:
+\begin{equation}
+\delta_t=r_t+\gamma V_\phi(\bm{s}_{t+1})-V_\phi(\bm{s}_t),\qquad
+\hat A_t=\sum_{l=0}^{\infty}(\gamma\lambda)^l\delta_{t+l}.
+\label{rl:eq:rl-gae}
+\end{equation}
+The implementation uses $\gamma=0.99$ and $\lambda=0.95$, balancing return-horizon information against variance \cite{schulman_2016_gae}.
+
+PPO reuses a rollout for several epochs but constrains the update through the probability ratio and clipped surrogate:
+\begin{equation}
+r_t(\theta)=\frac{\pi_\theta(\bm a_t\mid\bm s_t)}{\pi_{\theta_{\mathrm{old}}}(\bm a_t\mid\bm s_t)},\qquad
+L^{\mathrm{CLIP}}=\mathbb{E}_t\!\left[\min\!\left(r_t\hat A_t,\operatorname{clip}(r_t,1-\epsilon,1+\epsilon)\hat A_t\right)\right],
+\label{rl:eq:rl-clip}
+\end{equation}
+with $\epsilon=0.2$. The clip prevents a sampled action from becoming much more or less probable than it was when the rollout was collected. This gives PPO a first-order trust-region behavior without the constrained second-order optimization of TRPO \cite{schulman_2015_trpo,schulman_2017_ppo}.
+
+The critic and actor are trained together through
+\begin{equation}
+L(\theta,\phi)=-L^{\mathrm{CLIP}}+c_1L^V-c_2\mathcal{H}[\pi_\theta],
+\qquad L^V=\mathbb{E}_t\!\left[(V_\phi(\bm s_t)-\hat R_t)^2\right].
+\label{rl:eq:rl-total}
+\end{equation}
+The entropy term preserves exploration, while a KL-adaptive learning-rate schedule keeps the empirical divergence close to $\mathrm{KL}^{\star}=0.01$. Each iteration collects a fresh buffer of $N\times T$ transitions, computes advantages and returns, performs $K=5$ epochs over $M=4$ minibatches, then discards the buffer. The data therefore remain on-policy.
+
+\subsubsection{Per-Task Hyperparameters}
+
+The core PPO settings are shared across the task family. Only the rollout scale, network width, initial exploration, entropy weight, and align-task normalization change with task difficulty. This keeps the comparison interpretable and limits the number of tuned degrees of freedom.
+
+\begin{table}[!ht]
+\centering
+\caption{Per-task PPO hyperparameters for the four registered charging-arm environments. Values common to all tasks are listed once; task-specific values are shown per column. Buffer size is $N\times T$ transitions per iteration. Hidden dimensions apply to both the actor and the critic.}
+\label{rl:tab:rl-hyper}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Hyperparameter & Align & Reach & Insert & VisionInsert \\
+\midrule
+Parallel environments $N$ & 256 & 1024 & 1024 & 1024 \\
+Rollout steps/env $T$ & 32 & 24 & 24 & 24 \\
+Rollout buffer $N\times T$ & \num{8192} & \num{24576} & \num{24576} & \num{24576} \\
+Max iterations & 1000 & 800 & 1200 & 1500 \\
+Hidden dimensions & [128,128,64] & [128,128,64] & [256,256,128] & [256,256,128] \\
+Activation & ELU & ELU & ELU & ELU \\
+\texttt{init\_noise\_std} $\sigma_0$ & 0.8 & 1.0 & 1.0 & 1.0 \\
+Entropy coef.\ $c_2$ & 0.02 & 0.005 & 0.01 & 0.005 \\
+\texttt{empirical\_normalization} & True & False & False & False \\
+\midrule
+\multicolumn{5}{l}{\emph{Common to all tasks}} \\
+Base learning rate & \multicolumn{4}{c}{$1.0\times10^{-3}$ (KL-adaptive, $\text{KL}^\star=0.01$)} \\
+Discount $\gamma$ & \multicolumn{4}{c}{0.99} \\
+GAE $\lambda$ & \multicolumn{4}{c}{0.95} \\
+Clip $\epsilon$ & \multicolumn{4}{c}{0.2} \\
+Epochs $K$ / minibatches $M$ & \multicolumn{4}{c}{5 / 4} \\
+Value coef.\ $c_1$ / clipped value & \multicolumn{4}{c}{1.0 / enabled} \\
+Max gradient norm & \multicolumn{4}{c}{1.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\rlFloatBarrier
+
+\subsection{Neural Network Architecture}\label{rl:sec:rl-net}
+
+The actor and critic are multilayer perceptrons, appropriate for the low-dimensional inputs. The actor maps either the $12$-dimensional state or the $15$-dimensional camera feature vector to the mean of a three-dimensional diagonal Gaussian. The critic maps the privileged $12$-dimensional state to a scalar value estimate. Align and reach use hidden widths $[128,128,64]$; insertion and vision use $[256,256,128]$ after the smaller model plateaued.
+
+\begin{equation}
+\pi_\theta(\bm a\mid\bm s)=\mathcal N\!\big(\bm\mu_\theta(\bm s),\operatorname{diag}(\bm\sigma^2)\big),\qquad
+\log\pi_\theta=\sum_{i=1}^{3}\left[-\frac{(a_i-\mu_i)^2}{2\sigma_i^2}-\log\sigma_i-\tfrac12\log(2\pi)\right].
+\label{rl:eq:rl-gauss}
+\end{equation}
+ELU activations provide a smooth negative branch and avoid permanently inactive units. The state-independent standard deviation $\bm\sigma$ starts at the configured \texttt{init\_noise\_std}, then is learned together with the mean. During evaluation, the deterministic mean $\bm\mu_\theta$ is applied rather than a sampled action.
+
+The vision task uses an asymmetric actor--critic only during training: the actor receives camera-derived features, while the critic receives the true state. This gives a stable value target under occlusion and perception noise without placing privileged information on the robot. At deployment, only the camera actor is retained.
+
+\rlFloatBarrier
+
+\subsection{Domain Randomization}\label{rl:sec:rl-dr}
+
+The simulator can be treated as a parameterized generator. Let $\bm\xi$ collect quantities such as light intensity, material friction, camera noise, latency, and geometric offsets. Domain randomization replaces a single nominal setting with samples around it:
+\begin{equation}
+\bm\xi=\bar{\bm\xi}+\bm\varepsilon,\quad\bm\varepsilon\sim\mathcal N(\bm0,\bm\Sigma),
+\qquad\text{or}\qquad
+\xi_j\sim\mathcal U\!\left[\bar\xi_j(1-\rho_j),\bar\xi_j(1+\rho_j)\right].
+\label{rl:eq:rl-dr}
+\end{equation}
+The objective is not to predict every real disturbance exactly. It is to train a policy on a distribution broad enough that the physical robot appears as a familiar sample rather than an unseen environment \cite{tobin_2017_domainrand,peng_2018_dynamicsrand,zhao_2020_sim2realsurvey}.
+
+The committed state-based tasks retain deterministic resets and use target variation as the main source of difficulty. The planned transfer configuration adds visual, physical, and timing perturbations: dome-light intensity, socket and plug offsets, friction, damping, action delay, bearing noise, and camera latency. Keeping this distinction explicit prevents the report from treating planned randomization as completed experimental evidence.
+
+\rlFloatBarrier
+
+\subsection{Training Procedure}\label{rl:sec:rl-train}
+
+Training is synchronous across the replicated environments. At each control step, the simulator builds $\bm{s}_t$, the actor samples $\bm a_t$, the action map produces a joint target, and the environment stores $(\bm s_t,\bm a_t,r_t,\bm s_{t+1})$. After $T$ steps in every environment, the stacked batch has $N\times T$ transitions. For the primary insertion task, this is $1024\times24=\num{24576}$ transitions per update.
+
+The training budget follows directly from the rollout geometry:
+\begin{equation*}
+N\times T\times N_{\mathrm{iter}}=\num{24576}\times1200\approx\num{29.5}\ \text{million transitions}
+\end{equation*}
+for insertion, and approximately $37$ million transitions for the longer vision schedule. The stored data are discarded after each PPO update, so memory is dominated by the simulator state, the current rollout, and compact network parameters rather than by a persistent replay buffer.
+
+\subsection{Curriculum Learning}\label{rl:sec:rl-curr}
+
+The target distribution is expanded gradually rather than exposing the policy to the full socket shell from the first iteration. With $k$ environment steps and a curriculum horizon $K_c=6000$,
+\begin{equation}
+f=\min\!\left(1,\frac{k}{K_c}\right),\qquad
+\beta(f)=\beta_{\mathrm{easy}}+(\beta_{\mathrm{full}}-\beta_{\mathrm{easy}})f,
+\qquad
+\alpha(f)=\alpha_{\mathrm{easy}}+(\alpha_{\mathrm{full}}-\alpha_{\mathrm{easy}})f.
+\label{rl:eq:rl-curr}
+\end{equation}
+The azimuth range $\beta$ and shoulder/elbow range $\alpha$ expand linearly from an easy neighborhood of home posture to the full feasible shell. The radial and height bounds remain fixed because feasibility is already guaranteed by the forward-kinematic sampler. The short schedule reaches full difficulty early enough for the policy to spend most of its budget on the target distribution used during evaluation.
+
+\rlFloatBarrier
+
+\subsection{Performance Evaluation}\label{rl:sec:rl-eval}
+
+The primary metric is terminal insertion accuracy, not the time-average of intermediate success flags. With $d_T^{(i)}$ denoting final plug-tip error in evaluation episode $i$ and $d_s=\SI{10}{\milli\meter}$,
+\begin{equation}
+\mathrm{Acc}=\frac{1}{N}\sum_{i=1}^{N}\mathbf1\!\left[d_T^{(i)}<d_s\right].
+\label{rl:eq:rl-acc}
+\end{equation}
+This reports whether the plug is inside the seating tolerance at the end of the maneuver. A fixed-length episode necessarily contains an approach phase outside tolerance, so the time-average success signal is not a substitute for terminal accuracy.
+
+The terminal error distribution is reported with its mean, standard deviation, confidence interval, and upper tail:
+\begin{equation}
+\bar d_T=\frac1N\sum_i d_T^{(i)},\qquad
+\mathrm{CI}_{95\%}=\bar d_T\pm1.96\frac{s}{\sqrt N},\qquad q_{0.90}=\inf\{x:\Pr(d_T\le x)\ge0.90\}.
+\label{rl:eq:rl-ci}
+\end{equation}
+Evaluation uses deterministic mean actions and targets sampled from the full-difficulty distribution. This makes the metric a test of the learned controller rather than a mixture of controller quality and exploration noise.
+
+\begin{table}[!ht]
+\centering
+\caption{Evaluation protocol and development observations. Development values are not presented as final controlled experimental results.}
+\label{rl:tab:rl-evaluation}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.37\textwidth}p{0.53\textwidth}@{}}
+\toprule
+Item & Definition or observed value \\
+\midrule
+Evaluation actions & Deterministic actor mean $\bm\mu_\theta(\bm s)$ \\
+Target distribution & Full curriculum range, sampled independently of training rollouts \\
+Seating condition & $d_T<d_s$, with $d_s=\SI{10}{\milli\meter}$ \\
+Primary metric & Terminal insertion accuracy in \eqref{rl:eq:rl-acc} \\
+Error reporting & Mean, 95\% confidence interval, and $q_{0.90}$ \\
+Development observation & Approximately \SI{94.5}{\percent} terminal accuracy; $q_{0.90}=\SI{3.8}{\milli\meter}$ \\
+Evidence status & Tuning logs and code comments; pending controlled final benchmark and hardware trials \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The available development logs indicate approximately \SI{94.5}{\percent} terminal accuracy and a \SI{3.8}{\milli\meter} ninetieth-percentile error. These are development observations, not a final controlled benchmark. An earlier \SI{89}{\percent} configuration produced errors near the \SI{10}{\milli\meter} boundary. Reducing the action step from \ang{4} to \ang{3}, increasing the fine reward weight from $1.0$ to $1.5$, and adding the centering well shifted the error distribution toward the socket center. The remaining approximately \SI{5}{\percent} failures were more spatially uniform, motivating the larger network and higher insertion entropy coefficient.
+
+\rlFloatBarrier
+
+\subsection{Sim-to-Real Deployment}\label{rl:sec:rl-sim2real}
+
+The deployment chain preserves the training interface:
+\begin{equation*}
+\text{camera/proprioception}\ \longrightarrow\ \bm s_t\ \longrightarrow\ \pi_\theta(\bm s_t)\ \longrightarrow\ \bm q_t^{\mathrm{tgt}}\ \longrightarrow\ \text{servo pulses}.
+\end{equation*}
+At \SI{30}{\hertz}, the ROS~2 node assembles the observation, evaluates the frozen actor, applies the same action scaling and joint clipping as the simulator, and forwards the resulting targets to the serial bus. The state-based path supplies $\bm e_p$ from a socket estimate; the vision path supplies the two detected hole features. The policy itself is unchanged.
+
+Each target angle is mapped to the bus command by the calibrated affine conversion
+\begin{equation}
+p_i=\operatorname{clip}\!\big(s_i\theta_i+o_i,p_i^{\min},p_i^{\max}\big),\qquad i\in\{1,2,3\}.
+\label{rl:eq:rl-pulse}
+\end{equation}
+This is the same position interface represented by the implicit drives in simulation. The remaining transfer gap is therefore concentrated in dynamics, contact behavior, perception, and timing, which are the quantities addressed by calibration, domain randomization, and staged validation.
+
+\begin{table}[!ht]
+\centering
+\caption{Interface quantities held consistent between training and deployment.}
+\label{rl:tab:rl-transfer}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.31\textwidth}p{0.59\textwidth}@{}}
+\toprule
+Interface quantity & Common simulation--hardware interpretation \\
+\midrule
+Control rate & One target update every \SI{33}{\milli\second} (\SI{30}{\hertz}) \\
+Action range & Three normalized commands, clipped to $[-1,1]^3$ \\
+Actuation & Bounded joint-position targets, not direct torque commands \\
+Joint protection & Command clipping against calibrated position limits \\
+State-based target cue & Socket estimate expressed as plug-tip position error \\
+Vision target cue & Two socket-hole bearings and visibility flags \\
+Servo conversion & Per-joint affine angle-to-pulse map in \eqref{rl:eq:rl-pulse} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Safety is layered. Joint clipping prevents invalid commands; the faceplate-cross condition stops geometrically unsafe insertion; and the hardware supervisor can halt the arm on communication loss or abnormal behavior. Since no force sensor is available, these checks do not claim contact-force regulation. They provide bounded position control while physical insertion validation is still being completed.
+
+\rlFloatBarrier
+
+\subsection{Computational Requirements}\label{rl:sec:rl-compute}
+
+The workload is GPU-bound. Physics advances all environments together at \SI{120}{\hertz}; the policy and critic process the complete batch as dense tensors; and the vision renderer is enabled only when visual features are required. The primary insertion rollout contains \num{24576} state transitions, each with a $12$-dimensional observation and three actions, so the active buffer remains small compared with GPU memory. The vision task adds image rendering cost but not a large learned visual encoder because the actor receives low-dimensional socket features.
+
+Wall-clock time depends on GPU model, renderer settings, and driver version, so the report uses reproducible configuration quantities instead: environment count, rollout length, policy-update count, physics rate, and total transitions. This is more informative than a development-machine timing that cannot be reproduced on another system.
+
+\subsection{Validation Strategy}\label{rl:sec:rl-valid}
+
+Validation is organized from the lowest-level model to the integrated controller:
+\begin{equation*}
+\begin{aligned}
+&\text{forward/inverse kinematics}\ \longrightarrow\ \text{observation, action, and reward checks}\\
+&\longrightarrow\ \text{held-out policy evaluation}\ \longrightarrow\ \text{sim-to-real trials}.
+\end{aligned}
+\end{equation*}
+The kinematic model was checked before training: forward kinematics matched the articulation to $5.6\times10^{-17}$ m, and the analytic inverse-kinematics routine achieved a worst-case residual of \SI{0.21}{\milli\meter} across approximately \num{4500} sampled targets. The align task then provided static-hold, driven-hold, and fixed-direction probes for the action-to-IK path and reward signs.
+
+At policy level, terminal accuracy, confidence intervals, the ninetieth-percentile error, and failure locations are evaluated on held-out full-difficulty targets. The ablations are interpreted only after these lower layers have passed, so a performance change can be attributed to the policy, reward, or training setting rather than to an unverified kinematic or command path. Hardware trials remain the final validation rung and must report real insertion success, terminal error, and safety-trigger behavior separately from simulator results.
+
+
+\endgroup

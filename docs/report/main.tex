@@ -1,0 +1,671 @@
+\documentclass[10pt]{article}
+
+% -----------------------------------------------------------------------------
+% Single-column academic technical report.
+% -----------------------------------------------------------------------------
+
+\usepackage[a4paper,top=1.85cm,bottom=1.85cm,left=1.9cm,right=1.9cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+% \usepackage{newtxtext,newtxmath}
+\usepackage{lmodern}
+\usepackage[expansion=false]{microtype}
+\usepackage{amsmath,bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage[font=footnotesize,labelfont=bf,labelsep=colon]{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{tikz}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{titletoc}
+\usepackage{fancyhdr}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{balance}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc,fit,backgrounds}
+
+\definecolor{accessblue}{RGB}{0,144,181}
+\definecolor{accesscyan}{RGB}{0,169,206}
+\definecolor{lightbluebox}{RGB}{232,247,252}
+\definecolor{lightorangebox}{RGB}{250,239,225}
+\definecolor{lightgreenbox}{RGB}{235,247,235}
+\definecolor{lightgraybox}{RGB}{244,244,244}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=accessblue,
+    citecolor=accessblue,
+    urlcolor=accessblue,
+    pdftitle={Autonomous Differential-Drive Robot for Garage EV Charging: A Dynamic Visual SLAM Approach with RL-Augmented Precision Docking},
+    pdfauthor={Ammar Daher & Naya Yousef & Salman Daher & Mohammad Saoud}
+}
+
+\setlength{\parindent}{1em}
+\setlength{\parskip}{1.2pt}
+\setlength{\floatsep}{6pt plus 1pt minus 1pt}
+\setlength{\textfloatsep}{8pt plus 1pt minus 2pt}
+\setlength{\intextsep}{6pt plus 1pt minus 1pt}
+\setlength{\abovedisplayskip}{6pt}
+\setlength{\belowdisplayskip}{6pt}
+\setlength{\abovedisplayshortskip}{4pt}
+\setlength{\belowdisplayshortskip}{4pt}
+\setlength{\jot}{2pt}
+\setlength{\emergencystretch}{1.3em}
+\setlist[itemize]{leftmargin=1.15em,topsep=2pt,itemsep=1pt,parsep=0pt}
+\setlist[enumerate]{leftmargin=1.25em,topsep=2pt,itemsep=1pt,parsep=0pt}
+
+\renewcommand{\thesection}{\Roman{section}}
+\renewcommand{\thesubsection}{\Alph{subsection}}
+\renewcommand{\thesubsubsection}{\arabic{subsubsection})}
+
+\titleformat{\section}
+  {\color{accessblue}\bfseries\Large}
+  {\thesection.}{0.6em}{}
+\titlespacing*{\section}{0pt}{1.4ex plus .2ex minus .1ex}{0.55ex}
+\titleformat{\subsection}
+  {\bfseries\large}
+  {}{0pt}{}
+\titlespacing*{\subsection}{0pt}{1.0ex plus .15ex minus .1ex}{0.35ex}
+\titleformat{\subsubsection}
+  {\bfseries\itshape}
+  {}{0pt}{}
+\titlespacing*{\subsubsection}{0pt}{0.7ex}{0.2ex}
+
+% Only top-level sections carry Roman numerals. Subsection entries retain their
+% hierarchy in the contents page but intentionally omit letters and numbers.
+\titlecontents{section}
+  [0pt]{\vspace{0.35em}\color{accessblue}\bfseries}
+  {\contentslabel{2.2em}}{}
+  {\titlerule*[0.45pc]{.}\contentspage}
+\titlecontents{subsection}
+  [1.65em]{\small}
+  {}{}
+  {\titlerule*[0.45pc]{.}\contentspage}
+\titlecontents{subsubsection}
+  [3.25em]{\footnotesize}
+  {}{}
+  {\titlerule*[0.45pc]{.}\contentspage}
+
+\captionsetup[figure]{name=FIGURE,justification=centering}
+\captionsetup[table]{name=TABLE,justification=centering}
+\renewcommand{\tablename}{TABLE}
+\renewcommand{\figurename}{FIGURE}
+
+\pagestyle{fancy}
+\fancyhf{}
+
+\fancyhead[R]{\footnotesize \textit{Autonomous Differential-Drive Robot for Garage EV Charging}}
+%\fancyfoot[L]{\footnotesize TECHNICAL REPORT, MAY 2026}
+\fancyfoot[R]{\footnotesize \thepage}
+\renewcommand{\headrulewidth}{0.25pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\SE}{\mathrm{SE}}
+\newcommand{\SO}{\mathrm{SO}}
+\newcommand{\T}{\mathbf{T}}
+\newcommand{\Rmat}{\mathbf{R}}
+\newcommand{\tvec}{\mathbf{t}}
+\newcommand{\q}{\mathbf{q}}
+\newcommand{\qd}{\dot{\mathbf{q}}}
+\newcommand{\pc}{\mathbf{p}_{c}}
+\newcommand{\pg}{\mathbf{p}_{g}}
+\newcommand{\pv}{\mathbf{p}_{v}}
+\newcommand{\pe}{\mathbf{p}_{e}}
+\newcommand{\fc}{\mathbf{f}_{c}}
+\newcommand{\fe}{\mathbf{f}_{e}}
+\newcommand{\fid}{\mathbf{f}_{\mathrm{id}}}
+\newcommand{\cmd}{\mathbf{u}_{\mathrm{cmd}}}
+\newcommand{\eori}{e_{\psi}}
+
+\newcommand{\reportplaceholder}[2]{%
+  \fbox{%
+    \begin{minipage}[c][0.115\textheight][c]{0.84\textwidth}
+      \centering\footnotesize
+      \textbf{IMAGE PLACEHOLDER}\\[-0.05em]
+      \emph{#1}\\[0.20em]
+      \parbox{0.94\linewidth}{\centering #2}
+    \end{minipage}%
+  }%
+}
+
+\begin{document}
+
+\noindent\begin{minipage}{\textwidth}
+\centering\LARGE\bfseries Autonomous \textbf{Differential-Drive Robot for Garage EV Charging: Dynamic Visual SLAM approach with RL-Augmented Precision Docking}\par
+\end{minipage}\vspace{0.35em}
+
+\begin{center}
+{\large Ammar Daher, Mohammad Saoud, Naya Yousef, Salman Daher}\\\vspace{0.15em}
+
+{\normalsize Department of Robotics and Intelligent Systems Engineering, Manara University, Syria}\\[0.2em]
+{\normalsize Supervisor: Dr. Mothanna Alkubeily}
+\end{center}\vspace{0.5em}
+
+\noindent\rule{\textwidth}{0.35pt}\vspace{0.6em}
+
+\noindent \textcolor{accessblue}{\bfseries ABSTRACT}\quad
+Autonomous plug-in charging for electric vehicles is difficult because it requires accurate navigation, local pose estimation, and safe physical interaction during connector insertion. The charging process comprises four main phases: mobile-base approach, socket localization, plug-socket alignment, and contact-aware insertion. Small deviations in the robot trajectory, connector orientation, or applied contact force can lead to insertion failure, excessive mechanical stress, or unsafe interaction with the socket.
+
+This project introduces a laboratory-safe robotic framework for autonomous conductive charging. The platform combines a differential mobile base, a base-mounted Intel RealSense D435i camera for dynamic visual SLAM, a 3-DoF arm, and a Logitech C920 eye-in-hand camera (1080p RGB) for local socket observation. The system is implemented in ROS~2 and evaluated in Isaac Sim and Isaac Lab. The dynamic visual SLAM stage provides the mobile robot with a stable map and an approach pose near the target socket, while the eye-in-hand camera supports local plug-socket pose estimation during the final alignment phase.
+
+The proposed framework combines perception, navigation, reinforcement learning, and contact-aware control to execute the simplified plug-in charging task. A reinforcement-learning policy trained with Proximal Policy Optimization (PPO) refines the final alignment and insertion motion, while safety checks and force-aware constraints reduce excessive contact during interaction. The report defines and evaluates this complete pipeline for the laboratory plug-in socket experiment.
+\vspace{0.5em}
+
+
+
+
+\noindent \textcolor{accessblue}{\bfseries INDEX TERMS}\quad Autonomous charging, mobile manipulation, contact-rich connector insertion, dynamic visual SLAM, reinforcement learning, Isaac Lab, ROS~2, eye-in-hand perception.\vspace{0.85em}
+
+\tableofcontents
+\clearpage
+\listoffigures
+\clearpage
+\listoftables
+\clearpage
+\section{Introduction}
+
+Research on electric vehicles (EVs) has grown rapidly in recent years, and robotic technology is being developed to support this growth. One important direction is the automation of EV charging, where robotic and electronic systems plug and unplug the charging connector automatically. In this process, the connector must be inserted into the vehicle charging socket with proper alignment.
+
+Automated charging stations are therefore not only an energy-transfer problem but also a robotic manipulation problem: the charging connector must be guided toward the socket, aligned with the inlet, and inserted through a controlled motion. Previous studies on EV charging connectors have shown that the plugging and unplugging process strongly affects the safety and efficiency of charging, and that the motion profile during insertion is important for designing reliable robotic charging systems. Whereas that prior work characterizes the connection through force and torque, this project is motivated by the smoothness and safety of the plug-in motion, expressed through acceleration and jerk. Acceleration describes how quickly the connector velocity changes, and jerk is the rate of change of acceleration. Both quantities indicate motion smoothness: keeping them bounded reduces abrupt movements and improves the safety of insertion.
+
+At the same time, the robot must operate in an environment that may contain moving objects. Simultaneous localization and mapping (SLAM) is an established research field in robotics, but many SLAM methods rely on the static-world assumption. This assumption limits their use in real-world environments that are dynamic, unstructured, and only partially known. Dynamic visual SLAM addresses this limitation by allowing the robot to build a map while accounting for moving objects in the scene. A mobile charging robot needs this capability, since it must navigate toward the charging area, maintain a stable representation of the environment, and avoid treating dynamic objects as reliable static landmarks.
+
+This project studies a laboratory-safe version of autonomous plug-in charging using a differential mobile base, a base-mounted RGB-D camera for dynamic visual SLAM, a 3-DoF robotic arm, and an eye-in-hand RGB camera for local socket observation. The mobile base uses the SLAM stage to approach the target socket and maintain a map of the surrounding environment. The arm then performs the local alignment and insertion task. During this final phase, the end-effector mounting plane is kept parallel to the mobile-base ($x_b$-$y_b$) plane, which simplifies the plug-socket alignment problem and makes the experiment suitable for a controlled laboratory setup.
+
+The main objective of this work is to define and evaluate a robotic pipeline for simplified plug-in charging. The pipeline is organized into six implementation stages: mobile-base navigation, dynamic visual SLAM, local socket observation, plug-socket pose estimation, final alignment, and insertion. The study also defines the task phases, observation and action spaces, safety limits, reward function, and evaluation metrics. Motion smoothness and safety remain a guiding concern, with acceleration and jerk taken as indicators of how smooth the insertion motion is. A successful system should therefore not only reach the socket but also do so through a stable, smooth, and safe motion.
+
+\clearpage
+\section{Objectives}
+
+The primary aim of this thesis is to design, implement, and validate a complete robotic pipeline for autonomous conductive EV charging in a controlled laboratory environment. The objectives are structured to address each major subsystem in sequence, from the physical platform through to full mission integration.
+
+The first objective is to design and fabricate a compact differential-drive mobile robot platform capable of operating safely inside a structured indoor space. This encompasses the mechanical design of the mobile base, a three-degree-of-freedom robotic arm, and a passive compliant wrist that absorbs residual misalignment during plug-socket contact. The platform must also be modelled as a digital twin inside Isaac Sim, with kinematics and joint dynamics validated against the physical hardware before deployment.
+
+The second objective is to develop and integrate a dynamic visual SLAM pipeline that maintains stable robot localization and a consistent static map of the environment even when moving objects are present in the scene. The pipeline must classify and suppress dynamic features so that they do not contaminate the map or corrupt the pose estimates that the navigation module relies on during approach.
+
+The third objective is to implement socket detection and local pose estimation from the eye-in-hand RGB camera using a category-level keypoint-based object pose estimator. The estimated socket pose must be accurate enough, across a range of standoff distances, yaw angles, and lighting conditions, to bring the plug tip within the verified capture range of the fine-alignment controller without manual positioning.
+
+The fourth objective is to implement autonomous point-to-point navigation from a known base station to the target parking bay using the ROS~2 Navigation~2 stack with an MPPI local controller, operating on the costmap generated from the SLAM-derived voxel map. Navigation must succeed without collision and without operator intervention across all tested starting poses and obstacle configurations.
+
+The fifth objective is to design and train a reinforcement-learning insertion policy using Proximal Policy Optimization in Isaac Lab that refines final plug-socket alignment and executes the contact phase of insertion. The policy must improve terminal alignment accuracy over the deterministic inverse-kinematics baseline and must produce smooth, bounded motion quantified through jerk and acceleration metrics throughout the insertion trajectory.
+
+The sixth objective is to evaluate the sim-to-real transfer of the trained insertion policy on the physical robot through a structured hardware protocol spanning at least thirty trials across centred, left-offset, and right-offset initial conditions, and to identify the dominant failure modes that constrain physical performance.
+
+The seventh and final objective is to integrate all subsystems — dynamic SLAM, global navigation, socket detection, base refinement, arm control, and RL insertion — into a single state-machine-governed pipeline and to demonstrate complete autonomous charging missions in the laboratory from an arbitrary start pose to confirmed plug seating, without manual intervention at any stage.
+
+\section{Related Works}
+
+Hanai \textit{et al.}, working on robotic wrapping and deformable manipulation, proposed a framework that combines imitation learning and reinforcement learning. Their method uses demonstrations to obtain approximate tool-center-point trajectories and then uses RL to tune force-control parameters. The shared learning logic, rather than the wrapping task itself, is what carries over to our work: a nominal trajectory constrains the search space while RL corrects the contact behavior. Their training procedure also separates simulation training from real-world force adaptation, which parallels our sim-to-real plan, in which Isaac Sim is the simulator \cite{hanai2025wrapping}.
+
+Wang \textit{et al.} studied complex contact-rich insertion and presented an adaptive imitation learning framework that treats insertion as a nonlinear, low-clearance operation with phase-dependent force requirements. The term ``contact-rich insertion'' is established in the robotics literature for tasks where contact is expected and must be regulated rather than avoided. They explain why pure imitation learning is insufficient when force profiles are difficult to acquire, and why pure RL can be unsafe, since random exploration may cause excessive collisions. Their solution combines a trajectory-level skill policy with a low-level force-learning policy and introduces dynamical movement primitives to generalize trajectories between related insertion tasks \cite{wang2022adaptive}. This supports a key design choice in our project: rather than inserting the plug with blind random RL, the plug follows a structured nominal path and RL is used mainly for corrections and contact adaptation.
+
+Saputra \textit{et al.} examined EV charging connector interaction, characterizing plugging and unplugging of a Type~2 AC EV connector using force/torque measurements. Their experiments with human operators showed that plugging requires a higher impulse than unplugging and that the force and torque profiles vary over time. They also modeled these profiles using polynomial, Fourier, and Gaussian fitting, with the Gaussian model giving the most accurate fit \cite{saputra2025evft}. These results motivate our reward and safety design. Even though our laboratory socket is simplified, the plug-in stage should still be treated as a force-sensitive operation rather than a purely geometric motion.
+
+For robotic charging systems, previous works have used computer vision, force sensing, and mobile manipulation to localize the charging inlet and perform connector insertion \cite{miseikis2017charging,rakhmatulin2024pose,zhou2021plug,guo2021visionforce,chablat2022charging}. Such methods are highly relevant because the charging task can be modeled as a peg-in-hole insertion problem with perception uncertainty. Many approaches focus on perception or local alignment, and fewer studies connect global mobile navigation, dynamic-scene SLAM, and contact-rich arm insertion in a single prototype pipeline. This is the gap the present project targets, combining dynamic visual SLAM for the approach with reinforcement learning for the local alignment and insertion.
+
+
+\section{System Design}
+\label{sec:system_design}
+
+\subsection{Task}
+\label{sec:task}
+
+The task starts with a mapping run inside the garage. Before charging requests are handled, the robot drives through the accessible lanes while the base-mounted RGB-D camera records depth images, and dynamic visual SLAM estimates the camera pose during this scan. From the depth images and poses, nvblox builds a 3-D voxel map of the garage and produces a 2-D costmap for navigation \cite{millane2024nvblox,nvidia_nvblox}. The map represents the fixed parts of the garage, such as walls, pillars, lane boundaries, and the base station, and serves as the reference map during later charging runs.
+
+At the start of each charging run, the robot sits at the base station, a fixed and known location in the garage map. The robot is connected there to charge its own battery, so its initial pose is known before it moves. When a vehicle enters the garage, the system receives its parking-bay location, which becomes the navigation goal. The goal is the parking area, not the charging socket, because the socket position is not known until the robot reaches the vehicle.
+
+The global navigation stage moves the robot from the base station to the requested parking bay. A cost-aware A* planner in the ROS~2 Navigation 2 stack (Nav2) searches the costmap and creates a collision-free route \cite{nav2_smac}. Dynamic visual SLAM supplies the current base pose while the robot follows this route. For local control, Nav2 uses a Model Predictive Path Integral (MPPI) controller with the differential-drive motion model: at each control step it generates and scores short candidate trajectories, then sends the next linear and angular velocity command \cite{nav2_mppi}. This navigation stack is first validated in Isaac Sim with the same base and sensor arrangement, then deployed on the physical robot through the ROS~2 command chain.
+
+When the robot reaches the parking bay, it stops following the global route and begins the socket-search stage. A CenterPose detector finds the charging socket in the RGB image: it detects the object and its image keypoints, then estimates the pose of the trained socket class \cite{lin2022centerpose}. This RGB pose is combined with the depth image and the calibrated camera-to-base transform to obtain a coarse socket location in the base frame. The mobile base then makes small position and heading corrections until the socket lies inside the calibrated reachable workspace of the arm, the condition required before the arm begins the final alignment task.
+
+After this base adjustment, the eye-in-hand camera provides the close-range view needed for the fine plug-socket estimate. The RL policy then corrects the remaining alignment error and performs the insertion motion. The policy is trained offline in Isaac Lab, with socket pose, base stopping error, contact conditions, and sensor effects varied during training \cite{nvidia_isaaclab,haarnoja2018sac}. No online RL training is performed on the physical arm; the real robot runs the saved policy for inference, together with the predefined safety limits.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.88\textwidth]{Figures/report/garage_top_view.png}
+\caption{Garage charging task sequence from mapping and base-station departure to local socket alignment and plug insertion.}
+\label{fig:garage_top_view_placeholder}
+\end{figure}
+
+%========================mechanical_design===========================
+
+\begin{figure}[!htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=6mm and 7mm,
+  taskbox/.style={draw=accessblue, rounded corners=2pt, align=center, text width=0.19\textwidth, minimum height=12mm, fill=lightbluebox},
+  taskarr/.style={-{Latex[length=2mm]}, semithick, accessblue}]
+  \node[taskbox] (map) {Map garage\\and initialise at\\base station};
+  \node[taskbox, right=of map] (nav) {Navigate to\\requested bay\\with SLAM + Nav2};
+  \node[taskbox, right=of nav] (dock) {Detect socket\\and refine base\\stopping pose};
+  \node[taskbox, right=of dock] (insert) {Eye-in-hand alignment\\and guarded\\plug insertion};
+  \draw[taskarr] (map)--(nav);
+  \draw[taskarr] (nav)--(dock);
+  \draw[taskarr] (dock)--(insert);
+\end{tikzpicture}
+\caption{Operational sequence of the simplified autonomous charging task. Global navigation ends at the parking bay; the local perception and insertion stages then handle the socket-specific alignment.}
+\label{fig:garage_task_sequence}
+\end{figure}
+
+\input{mechanical_design_after_task}
+
+
+%========================electrical_design===========================
+\input{electrical_design_after_task}
+
+
+
+%========================software_design===========================
+\input{software_architecture_after_task}
+
+
+%========================methodology_design===========================
+\input{methodology_after_system_design}
+
+
+
+%========================methodology_design===========================
+\input{rl_training_after_methodology}
+
+%========================experiments_and_results========================
+\input{experiments_and_results}
+
+\clearpage
+\section{Conclusion}
+
+This thesis presented the design, implementation, and experimental validation of a robotic platform for autonomous conductive EV charging. The work addressed a complete pipeline spanning global navigation, dynamic scene mapping, local socket perception, and contact-aware plug insertion, integrating these stages into a single laboratory-safe system governed by a unified state machine.
+
+The first objective, designing and building the mobile robot platform, was met in full. The differential-drive base, three-degree-of-freedom arm, and passive compliant wrist were mechanically designed, fabricated, and modelled as a digital twin in Isaac Sim. Kinematic and dynamic validation against the physical hardware confirmed that the simulation faithfully reproduces joint motion and end-effector geometry, providing a reliable environment for policy training and for offline analysis of workspace reachability.
+
+The second objective, dynamic visual SLAM, was fulfilled by integrating ORB-SLAM3 with a moving-object rejection filter that operates on the RGB-D stream from the base-mounted Intel RealSense D435i camera. The resulting pipeline maintains stable localization and a clean static map when moving agents are present in the scene, as demonstrated by the structured trajectory-error experiments comparing static-scene and dynamic-scene conditions across multiple laboratory runs.
+
+The third objective, socket detection and local pose estimation, was addressed using a CenterPose keypoint detector operating on the Logitech C920 eye-in-hand camera. The detector estimates the six-degree-of-freedom socket pose from RGB images and was evaluated across multiple standoff distances, yaw angles, and lighting conditions. The measured pose errors confirm that the perception module consistently delivers estimates within the capture range required by the fine-alignment controller for the evaluated conditions.
+
+The fourth objective, autonomous navigation, was met by deploying the ROS~2 Navigation~2 stack with a Smac A* global planner and an MPPI local controller operating on the nvblox-generated costmap. Navigation trials demonstrated that the mobile base reaches the documented approach pose in front of the charging socket across multiple starting locations and under both static and dynamic obstacle configurations, without collision and without operator assistance.
+
+The fifth objective, the reinforcement-learning insertion policy, was achieved by training a PPO agent in Isaac Lab using the Isaac Sim digital twin with domain randomization across visual, dynamic, and geometric perturbations. The held-out evaluation confirmed that the policy improves terminal alignment accuracy and success rate over the deterministic inverse-kinematics baseline, while maintaining bounded jerk and acceleration throughout the insertion trajectory, satisfying both the performance and smoothness requirements stated at the outset.
+
+The sixth objective, physical hardware validation, was addressed through structured insertion trials on the real arm with three initial offset conditions. The experiments confirmed that sim-to-real transfer is viable for centred and near-centred initial poses. The outer-offset conditions revealed residual sensitivity to kinematic calibration error and the absence of contact-force feedback, identifying the two most important directions for future platform development.
+
+The seventh objective, end-to-end system integration, was demonstrated by connecting all modules under the behaviour-tree state machine, which coordinates the SLAM stage, the global navigation planner, the socket-search loop, the base-refinement step, and the RL insertion policy without manual intervention between phases. Complete autonomous missions from a documented start pose to confirmed plug seating were executed in the laboratory, validating the full pipeline design and the inter-module handoff logic at each transition.
+
+Taken together, the results confirm that an autonomous robotic charging system can be constructed from commodity hardware, open-source navigation and mapping tools, and a simulation-trained reinforcement-learning policy, while operating within the strict safety constraints required by a laboratory setting. The primary remaining limitations --- the absence of calibrated force sensing during insertion, sensitivity to large lateral offsets caused by kinematic calibration tolerances, and reliance on controlled illumination for reliable socket detection --- are precisely identified by the per-experiment results and constitute a clear agenda for the next development stage.
+
+\newpage
+
+\begin{thebibliography}{99}
+
+\bibitem{hanai2025wrapping}
+H. Hanai, T. Kiyokawa, W. Wan, and K. Harada, ``Robotic paper wrapping by learning force control,'' \emph{IEEE Access}, accepted for publication, 2025.
+
+\bibitem{wang2022adaptive}
+Y. Wang, C. C. Beltran-Hernandez, W. Wan, and K. Harada, ``An adaptive imitation learning framework for robotic complex contact-rich insertion tasks,'' \emph{Frontiers in Robotics and AI}, vol. 8, Article 777363, 2022.
+
+\bibitem{saputra2025evft}
+H. M. Saputra, N. S. M. Nor, E. Rijanto, A. Pahrurrozi, C. H. A. H. B. Baskoro, E. Yazid, M. Z. M. Zain, and I. Z. M. Darus, ``Characterization of plugging and unplugging process for electric vehicle charging connectors based on force/torque measurements,'' \emph{Measurement}, vol. 242, Article 115876, 2025.
+
+\bibitem{miseikis2017charging}
+J. Miseikis, M. Ruther, B. Walzel, M. Hirz, and H. Brunner, ``3D vision guided robotic charging station for electric and plug-in hybrid vehicles,'' in \emph{OAGM and ARW Joint Workshop on Vision, Automation and Robotics}, 2017.
+
+\bibitem{rakhmatulin2024pose}
+V. Rakhmatulin, M. A. Cabrera, A. Puchkov, E. Burnaev, and D. Tsetserukou, ``Pose estimation in robotic electric vehicle plug-in charging tasks using auto-annotation and deep learning-based keypoint detector,'' \emph{Engineering Applications of Artificial Intelligence}, vol. 133, Article 108455, 2024.
+
+\bibitem{zhou2021plug}
+Z. Zhou, L. Li, R. Wang, and X. Zhang, ``Deep learning on 3D object detection for automatic plug-in charging using a mobile manipulator,'' in \emph{Proc. IEEE Int. Conf. Robotics and Automation}, 2021, pp. 4148--4154.
+
+\bibitem{guo2021visionforce}
+D. Guo, L. Xie, H. Yu, Y. Wang, and R. Xiong, ``Electric vehicle automatic charging system based on vision-force fusion,'' in \emph{Proc. IEEE Int. Conf. Robotics and Biomimetics}, 2021, pp. 405--410.
+
+\bibitem{chablat2022charging}
+D. Chablat, R. Mattacchione, and E. Ottaviano, ``Design of a robot for the automatic charging of an electric car,'' in \emph{ROMANSY 24: Robot Design, Dynamics and Control}, Springer, 2022.
+
+\bibitem{millane2024nvblox}
+A. Millane, H. Oleynikova, E. Wirbel, R. Steiner, V. Ramasamy, D. Tingdahl, and R. Siegwart, ``nvblox: GPU-Accelerated Incremental Signed Distance Field Mapping,'' in \emph{Proc. IEEE Int. Conf. Robotics and Automation}, 2024.
+
+\bibitem{nvidia_nvblox}
+NVIDIA, ``Isaac ROS Nvblox,'' [Online]. Available: \url{https://nvidia-isaac-ros.github.io/concepts/scene_reconstruction/nvblox/index.html}. Accessed: Jun. 25, 2026.
+
+\bibitem{nav2_smac}
+Open Navigation LLC, ``Smac Planner,'' \emph{Nav2 Documentation}, [Online]. Available: \url{https://docs.nav2.org/configuration/packages/configuring-smac-planner.html}. Accessed: Jun. 25, 2026.
+
+\bibitem{nav2_mppi}
+Open Navigation LLC, ``Model Predictive Path Integral Controller,'' \emph{Nav2 Documentation}, [Online]. Available: \url{https://docs.nav2.org/configuration/packages/configuring-mppic.html}. Accessed: Jun. 25, 2026.
+
+\bibitem{lin2022centerpose}
+Y. Lin, J. Tremblay, S. Tyree, P. A. Vela, and S. Birchfield, ``Single-Stage Keypoint-Based Category-Level Object Pose Estimation from an RGB Image,'' in \emph{Proc. IEEE Int. Conf. Robotics and Automation}, 2022.
+
+\bibitem{nvidia_isaaclab}
+NVIDIA, ``Isaac Lab Documentation,'' [Online]. Available: \url{https://docs.isaacsim.omniverse.nvidia.com/4.2.0/isaac_lab_tutorials/index.html}. Accessed: Jun. 25, 2026.
+
+\bibitem{haarnoja2018sac}
+T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine, ``Soft Actor-Critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor,'' in \emph{Proc. Int. Conf. Machine Learning}, 2018, pp. 1861--1870.
+
+\bibitem{macenski_2022_ros2}
+Steven Macenski, Tully Foote, Brian Gerkey, Chris Lalancette, and William
+  Woodall.
+\newblock Robot operating system 2: Design, architecture, and uses in the wild.
+\newblock {\em Science Robotics}, 7(66):eabm6074, 2022.
+
+\bibitem{macenski_2020_nav2}
+Steve Macenski, Francisco Martin, Ruffin White, and Jonatan~Gines Clavero.
+\newblock The marathon 2: A navigation system.
+\newblock In {\em 2020 IEEE/RSJ International Conference on Intelligent Robots
+  and Systems (IROS)}, 2020.
+\newblock arXiv:2003.00368.
+
+\bibitem{redmon2016yolo}
+Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali Farhadi.
+\newblock {You Only Look Once: Unified, Real-Time Object Detection}.
+\newblock In {\em 2016 IEEE Conference on Computer Vision and Pattern
+  Recognition (CVPR)}, pages 779--788, 2016.
+
+\bibitem{siegwart2011mobile}
+Roland Siegwart, Illah~R. Nourbakhsh, and Davide Scaramuzza.
+\newblock {\em {Introduction to Autonomous Mobile Robots}}.
+\newblock MIT Press, Cambridge, MA, 2nd edition, 2011.
+
+\bibitem{hartley2004mvg}
+Richard Hartley and Andrew Zisserman.
+\newblock {\em {Multiple View Geometry in Computer Vision}}.
+\newblock Cambridge University Press, 2nd edition, 2004.
+
+\bibitem{sturm_2012_rgbd_benchmark}
+Jurgen Sturm, Nikolas Engelhard, Felix Endres, Wolfram Burgard, and Daniel
+  Cremers.
+\newblock A benchmark for the evaluation of {RGB-D} {SLAM} systems.
+\newblock In {\em 2012 IEEE/RSJ International Conference on Intelligent Robots
+  and Systems (IROS)}, pages 573--580, 2012.
+
+\bibitem{murartal_2015_orbslam}
+Raul Mur-Artal, J.~M.~M. Montiel, and Juan~D. Tardos.
+\newblock {ORB-SLAM}: A versatile and accurate monocular {SLAM} system.
+\newblock {\em IEEE Transactions on Robotics}, 31(5):1147--1163, 2015.
+
+\bibitem{campos_2021_orbslam3}
+Carlos Campos, Richard Elvira, Juan~J. Gomez~Rodriguez, Jose M.~M. Montiel, and
+  Juan~D. Tardos.
+\newblock {ORB-SLAM3}: An accurate open-source library for visual,
+  visual-inertial, and multimap {SLAM}.
+\newblock {\em IEEE Transactions on Robotics}, 37(6):1874--1890, 2021.
+
+\bibitem{rublee2011orb}
+Ethan Rublee, Vincent Rabaud, Kurt Konolige, and Gary Bradski.
+\newblock {ORB: An Efficient Alternative to SIFT or SURF}.
+\newblock In {\em 2011 International Conference on Computer Vision (ICCV)},
+  pages 2564--2571, 2011.
+
+\bibitem{rosten2006fast}
+Edward Rosten and Tom Drummond.
+\newblock {Machine Learning for High-Speed Corner Detection}.
+\newblock In {\em Computer Vision -- ECCV 2006}, volume 3951 of {\em Lecture
+  Notes in Computer Science}, pages 430--443. Springer, 2006.
+
+\bibitem{calonder2010brief}
+Michael Calonder, Vincent Lepetit, Christoph Strecha, and Pascal Fua.
+\newblock {BRIEF: Binary Robust Independent Elementary Features}.
+\newblock In {\em Computer Vision -- ECCV 2010}, volume 6314 of {\em Lecture
+  Notes in Computer Science}, pages 778--792. Springer, 2010.
+
+\bibitem{nister2004fivepoint}
+David Nist\'{e}r.
+\newblock {An Efficient Solution to the Five-Point Relative Pose Problem}.
+\newblock {\em IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  26(6):756--770, 2004.
+
+\bibitem{lepetit2009epnp}
+Vincent Lepetit, Francesc Moreno-Noguer, and Pascal Fua.
+\newblock {EPnP: An Accurate O(n) Solution to the PnP Problem}.
+\newblock {\em International Journal of Computer Vision}, 81(2):155--166, 2009.
+
+\bibitem{fischler1981ransac}
+Martin~A. Fischler and Robert~C. Bolles.
+\newblock {Random Sample Consensus: A Paradigm for Model Fitting with
+  Applications to Image Analysis and Automated Cartography}.
+\newblock {\em Communications of the ACM}, 24(6):381--395, 1981.
+
+\bibitem{triggs2000bundle}
+Bill Triggs, Philip~F. McLauchlan, Richard~I. Hartley, and Andrew~W.
+  Fitzgibbon.
+\newblock {Bundle Adjustment -- A Modern Synthesis}.
+\newblock In {\em Vision Algorithms: Theory and Practice}, volume 1883 of {\em
+  Lecture Notes in Computer Science}, pages 298--372. Springer, 2000.
+
+\bibitem{agarwal2012ceres}
+Sameer Agarwal, Keir Mierle, et~al.
+\newblock {Ceres Solver}.
+\newblock \url{http://ceres-solver.org}, 2012.
+
+\bibitem{galvezlopez2012dbow2}
+Dorian G\'{a}lvez-L\'{o}pez and Juan~D. Tard\'{o}s.
+\newblock {Bags of Binary Words for Fast Place Recognition in Image Sequences}.
+\newblock {\em IEEE Transactions on Robotics}, 28(5):1188--1197, 2012.
+
+\bibitem{curless1996tsdf}
+Brian Curless and Marc Levoy.
+\newblock {A Volumetric Method for Building Complex Models from Range Images}.
+\newblock In {\em Proceedings of the 23rd Annual Conference on Computer
+  Graphics and Interactive Techniques (SIGGRAPH '96)}, pages 303--312. ACM,
+  1996.
+
+\bibitem{newcombe2011kinectfusion}
+Richard~A. Newcombe, Shahram Izadi, Otmar Hilliges, David Molyneaux, David Kim,
+  Andrew~J. Davison, Pushmeet Kohli, Jamie Shotton, Steve Hodges, and Andrew
+  Fitzgibbon.
+\newblock {KinectFusion: Real-Time Dense Surface Mapping and Tracking}.
+\newblock In {\em 2011 10th IEEE International Symposium on Mixed and Augmented
+  Reality (ISMAR)}, pages 127--136, 2011.
+
+\bibitem{oleynikova2017voxblox}
+Helen Oleynikova, Zachary Taylor, Marius Fehr, Roland Siegwart, and Juan Nieto.
+\newblock {Voxblox: Incremental 3D Euclidean Signed Distance Fields for
+  On-Board MAV Planning}.
+\newblock In {\em 2017 IEEE/RSJ International Conference on Intelligent Robots
+  and Systems (IROS)}, pages 1366--1373, 2017.
+
+\bibitem{hart1968astar}
+Peter~E. Hart, Nils~J. Nilsson, and Bertram Raphael.
+\newblock {A Formal Basis for the Heuristic Determination of Minimum Cost
+  Paths}.
+\newblock {\em IEEE Transactions on Systems Science and Cybernetics},
+  4(2):100--107, 1968.
+
+\bibitem{williams2017mppi}
+Grady Williams, Nolan Wagener, Brian Goldfain, Paul Drews, James~M. Rehg, Byron
+  Boots, and Evangelos~A. Theodorou.
+\newblock {Information Theoretic MPC for Model-Based Reinforcement Learning}.
+\newblock In {\em 2017 IEEE International Conference on Robotics and Automation
+  (ICRA)}, pages 1714--1721, 2017.
+
+\bibitem{colledanchise2018bt}
+Michele Colledanchise and Petter {\"O}gren.
+\newblock {\em {Behavior Trees in Robotics and AI: An Introduction}}.
+\newblock Chapman \& Hall/CRC Artificial Intelligence and Robotics Series. CRC
+  Press, 2018.
+
+\bibitem{fierro1997wmr}
+Rafael Fierro and Frank~L. Lewis.
+\newblock {Control of a Nonholonomic Mobile Robot: Backstepping Kinematics into
+  Dynamics}.
+\newblock {\em Journal of Robotic Systems}, 14(3):149--163, 1997.
+
+\bibitem{mittal_2023_orbit}
+Mayank Mittal, Calvin Yu, Qinxi Yu, Jingzhou Liu, Nikita Rudin, David Hoeller,
+  Jia~Lin Yuan, Ritvik Singh, Yunrong Guo, Hammad Mazhar, Ajay Mandlekar, Buck
+  Babich, Gavriel State, Marco Hutter, and Animesh Garg.
+\newblock Orbit: A unified simulation framework for interactive robot learning
+  environments.
+\newblock {\em IEEE Robotics and Automation Letters}, 8(6):3740--3747, 2023.
+\newblock arXiv:2301.04195.
+
+\bibitem{makoviychuk_2021_isaacgym}
+Viktor Makoviychuk, Lukasz Wawrzyniak, Yunrong Guo, Michelle Lu, Kier Storey,
+  Miles Macklin, David Hoeller, Nikita Rudin, Arthur Allshire, Ankur Handa, and
+  Gavriel State.
+\newblock Isaac gym: High performance {GPU}-based physics simulation for robot
+  learning, 2021.
+\newblock arXiv:2108.10470.
+
+\bibitem{chaumette_2006_visualservo}
+Fran\c{c}ois Chaumette and Seth Hutchinson.
+\newblock Visual servo control, part i: Basic approaches.
+\newblock {\em IEEE Robotics and Automation Magazine}, 13(4):82--90, 2006.
+
+\bibitem{lin_2022_centerpose}
+Yunzhi Lin, Jonathan Tremblay, Stephen Tyree, Patricio~A. Vela, and Stan
+  Birchfield.
+\newblock Single-stage keypoint-based category-level object pose estimation
+  from an {RGB} image.
+\newblock In {\em 2022 IEEE International Conference on Robotics and Automation
+  (ICRA)}, 2022.
+\newblock arXiv:2109.06161.
+
+\bibitem{schulman_2017_ppo}
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov.
+\newblock Proximal policy optimization algorithms, 2017.
+\newblock arXiv:1707.06347.
+
+\bibitem{whitney_1982_quasistatic}
+Daniel~E. Whitney.
+\newblock Quasi-static assembly of compliantly supported rigid parts.
+\newblock \emph{Journal of Dynamic Systems, Measurement, and Control},
+  104\penalty0 (1):\penalty0 65--77, 1982.
+\newblock URL \url{https://doi.org/10.1115/1.3149634}.
+
+\bibitem{xu_2019_pegsurvey}
+Jing Xu, Zhimin Hou, Zhi Liu, and Hong Qiao.
+\newblock Compare contact model-based control and contact model-free learning:
+  A survey of robotic peg-in-hole assembly strategies, 2019.
+\newblock URL \url{https://arxiv.org/abs/1904.05240}.
+\newblock arXiv:1904.05240.
+
+\bibitem{johannink_2019_residual}
+Tobias Johannink, Shikhar Bahl, Ashvin Nair, Jianlan Luo, Avinash Kumar,
+  Matthias Loskyll, Juan~Aparicio Ojea, Eugen Solowjow, and Sergey Levine.
+\newblock Residual reinforcement learning for robot control.
+\newblock In \emph{2019 IEEE International Conference on Robotics and
+  Automation (ICRA)}, pages 6023--6029, 2019.
+\newblock URL \url{https://doi.org/10.1109/ICRA.2019.8794127}.
+\newblock arXiv:1812.03201.
+
+\bibitem{schoettler_2020_industrial}
+Gerrit Schoettler, Ashvin Nair, Jianlan Luo, Shikhar Bahl, Juan~Aparicio Ojea,
+  Eugen Solowjow, and Sergey Levine.
+\newblock Deep reinforcement learning for industrial insertion tasks with
+  visual inputs and natural rewards.
+\newblock In \emph{2020 IEEE/RSJ International Conference on Intelligent Robots
+  and Systems (IROS)}, 2020.
+\newblock URL \url{https://arxiv.org/abs/1906.05841}.
+\newblock arXiv:1906.05841.
+
+\bibitem{tang_2023_industreal}
+Bingjie Tang, Michael~A. Lin, Iretiayo Akinola, Ankur Handa, Gaurav~S.
+  Sukhatme, Fabio Ramos, Dieter Fox, and Yashraj Narang.
+\newblock {IndustReal}: Transferring contact-rich assembly tasks from
+  simulation to reality.
+\newblock In \emph{Robotics: Science and Systems (RSS)}, 2023.
+\newblock URL \url{https://arxiv.org/abs/2305.17110}.
+\newblock arXiv:2305.17110.
+
+\bibitem{rudin_2022_parallel}
+Nikita Rudin, David Hoeller, Philipp Reist, and Marco Hutter.
+\newblock Learning to walk in minutes using massively parallel deep
+  reinforcement learning.
+\newblock In \emph{Proceedings of the 5th Conference on Robot Learning (CoRL)},
+  volume 164 of \emph{PMLR}, pages 91--100, 2022.
+\newblock URL \url{https://proceedings.mlr.press/v164/rudin22a.html}.
+\newblock arXiv:2109.11978.
+
+\bibitem{spector_2021_insertionnet}
+Oren Spector and Dotan Di~Castro.
+\newblock {InsertionNet} -- a scalable solution for insertion.
+\newblock \emph{IEEE Robotics and Automation Letters}, 6\penalty0 (3):\penalty0
+  5509--5516, 2021.
+\newblock URL \url{https://doi.org/10.1109/LRA.2021.3076971}.
+\newblock arXiv:2104.14223.
+
+\bibitem{sutton_2018_rlintro}
+Richard~S. Sutton and Andrew~G. Barto.
+\newblock \emph{Reinforcement Learning: An Introduction}.
+\newblock MIT Press, Cambridge, MA, 2nd edition, 2018.
+
+\bibitem{wampler_1986_dls}
+Charles~W. Wampler.
+\newblock Manipulator inverse kinematic solutions based on vector formulations
+  and damped least-squares methods.
+\newblock \emph{IEEE Transactions on Systems, Man, and Cybernetics},
+  16\penalty0 (1):\penalty0 93--101, 1986.
+\newblock URL \url{https://doi.org/10.1109/TSMC.1986.289285}.
+
+\bibitem{nakamura_1986_singularity}
+Yoshihiko Nakamura and Hideo Hanafusa.
+\newblock Inverse kinematic solutions with singularity robustness for robot
+  manipulator control.
+\newblock \emph{Journal of Dynamic Systems, Measurement, and Control},
+  108\penalty0 (3):\penalty0 163--171, 1986.
+\newblock URL \url{https://doi.org/10.1115/1.3143764}.
+
+\bibitem{schulman_2016_gae}
+John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter
+  Abbeel.
+\newblock High-dimensional continuous control using generalized advantage
+  estimation.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2016.
+\newblock URL \url{https://arxiv.org/abs/1506.02438}.
+\newblock arXiv:1506.02438.
+
+\bibitem{schulman_2015_trpo}
+John Schulman, Sergey Levine, Philipp Moritz, Michael~I. Jordan, and Pieter
+  Abbeel.
+\newblock Trust region policy optimization.
+\newblock In \emph{Proceedings of the 32nd International Conference on Machine
+  Learning (ICML)}, 2015.
+\newblock URL \url{https://arxiv.org/abs/1502.05477}.
+\newblock arXiv:1502.05477.
+
+\bibitem{tobin_2017_domainrand}
+Josh Tobin, Rachel Fong, Alex Ray, Jonas Schneider, Wojciech Zaremba, and
+  Pieter Abbeel.
+\newblock Domain randomization for transferring deep neural networks from
+  simulation to the real world.
+\newblock In \emph{2017 IEEE/RSJ International Conference on Intelligent Robots
+  and Systems (IROS)}, 2017.
+\newblock URL \url{https://doi.org/10.1109/IROS.2017.8202133}.
+\newblock arXiv:1703.06907.
+
+\bibitem{peng_2018_dynamicsrand}
+Xue~Bin Peng, Marcin Andrychowicz, Wojciech Zaremba, and Pieter Abbeel.
+\newblock Sim-to-real transfer of robotic control with dynamics randomization.
+\newblock In \emph{2018 IEEE International Conference on Robotics and
+  Automation (ICRA)}, pages 3803--3810, 2018.
+\newblock URL \url{https://doi.org/10.1109/ICRA.2018.8460528}.
+\newblock arXiv:1710.06537.
+
+\bibitem{openai_2019_rubikscube}
+{OpenAI}, Ilge Akkaya, Marcin Andrychowicz, Maciek Chociej, Mateusz Litwin, Bob
+  McGrew, Arthur Petron, Alex Paino, Matthias Plappert, Glenn Powell, Raphael
+  Ribas, Jonas Schneider, Nikolas Tezak, Jerry Tworek, Peter Welinder, Lilian
+  Weng, Qiming Yuan, Wojciech Zaremba, and Lei Zhang.
+\newblock Solving rubik's cube with a robot hand, 2019.
+\newblock URL \url{https://arxiv.org/abs/1910.07113}.
+\newblock arXiv:1910.07113.
+
+\bibitem{zhao_2020_sim2realsurvey}
+Wenshuai Zhao, Jorge Pe\~na Queralta, and Tomi Westerlund.
+\newblock Sim-to-real transfer in deep reinforcement learning for robotics: a
+  survey.
+\newblock In \emph{2020 IEEE Symposium Series on Computational Intelligence
+  (SSCI)}, pages 737--744, 2020.
+\newblock URL \url{https://doi.org/10.1109/SSCI47803.2020.9308468}.
+\newblock arXiv:2009.13303.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,1256 @@
+% Paste this file as a separate top-level section after System Design.
+% It has been converted from a standalone chapter. No preamble is included.
+
+\begingroup
+% Libraries required by the methodology diagrams.
+\usetikzlibrary{shapes.misc,chains,decorations.pathmorphing,angles,quotes}
+
+% Diagram styles used in this section.
+\definecolor{cproc}{RGB}{225,235,250}
+\definecolor{cnode}{RGB}{223,242,228}
+\definecolor{ctopic}{RGB}{253,240,221}
+\definecolor{cdata}{RGB}{238,238,242}
+\definecolor{clayer}{RGB}{244,247,252}
+\definecolor{chw}{RGB}{246,228,228}
+\tikzset{
+  every node/.append style={align=center},
+  box/.style   ={draw=blue!40, rounded corners=2pt, align=center, font=\small,
+                 inner sep=4pt, minimum height=8mm, fill=cproc},
+  proc/.style  ={box},
+  data/.style  ={draw=gray!55, align=center, font=\footnotesize, inner sep=4pt,
+                 minimum height=7mm, fill=cdata, rounded corners=1pt},
+  rnode/.style ={draw=green!45!black, rounded corners=8pt, align=center,
+                 font=\footnotesize, inner sep=4pt, minimum height=7mm, fill=cnode},
+  hw/.style    ={draw=red!45!black, rounded corners=2pt, align=center,
+                 font=\footnotesize, inner sep=4pt, minimum height=7mm, fill=chw},
+  topic/.style ={draw=orange!60!black, align=center, font=\scriptsize,
+                 inner sep=3pt, minimum height=5.5mm, fill=ctopic, rounded corners=1pt},
+  state/.style ={draw=blue!50, rounded corners=5pt, align=center, font=\small,
+                 inner sep=4pt, minimum height=8mm, fill=cproc},
+  layer/.style ={draw=blue!35, rounded corners=3pt, inner sep=7pt, fill=clayer, align=center},
+  arr/.style   ={-{Latex[length=2.2mm]}, semithick, blue!55!black},
+  darr/.style  ={-{Latex[length=2.2mm]}, semithick, dashed, gray!60!black},
+  lbl/.style   ={font=\scriptsize, fill=white, inner sep=1.5pt},
+}
+
+% Local mathematical shorthand. The group prevents these definitions from
+% changing notation elsewhere in the report.
+\renewcommand{\R}{\mathrm{R}}
+\renewcommand{\SE}{\mathrm{SE}}
+\renewcommand{\SO}{\mathrm{SO}}
+\renewcommand{\T}{^{\mathsf{T}}}
+\providecommand{\vu}{\mathbf{u}}
+\providecommand{\vx}{\mathbf{x}}
+\providecommand{\vX}{\mathbf{X}}
+\providecommand{\vq}{\mathbf{q}}
+\providecommand{\vt}{\mathbf{t}}
+\providecommand{\vn}{\mathbf{n}}
+\providecommand{\vP}{\mathbf{P}}
+\providecommand{\vr}{\mathbf{r}}
+\providecommand{\vy}{\mathbf{y}}
+\providecommand{\vb}{\mathbf{b}}
+\providecommand{\vp}{\mathbf{p}}
+\providecommand{\vv}{\mathbf{v}}
+\providecommand{\vw}{\mathbf{w}}
+\providecommand{\ve}{\mathbf{e}}
+\providecommand{\va}{\mathbf{a}}
+\providecommand{\vc}{\mathbf{c}}
+\providecommand{\vd}{\mathbf{d}}
+\providecommand{\vk}{\mathbf{k}}
+\providecommand{\vs}{\mathbf{s}}
+\providecommand{\vz}{\mathbf{z}}
+\providecommand{\vg}{\mathbf{g}}
+\providecommand{\vf}{\mathbf{f}}
+\providecommand{\vF}{\mathbf{F}}
+\providecommand{\vJ}{\mathbf{J}}
+\providecommand{\vomega}{\bm{\omega}}
+\providecommand{\vtau}{\bm{\tau}}
+\providecommand{\veta}{\bm{\eta}}
+\providecommand{\argmin}{\operatorname*{arg\,min}}
+\providecommand{\argmax}{\operatorname*{arg\,max}}
+
+\section{Methodology}\label{meth:ch:method}
+
+This chapter develops the complete chain of models, algorithms, and software interfaces that turns a collection of low-cost devices---a differential-drive wheel base, a single RGB-D camera, a 3-DoF arm, and a microcontroller-driven plug---into one autonomous agent. That agent must enter an unmapped room, localize itself while it moves, drive to a charging station, find the socket, and insert the plug. The presentation is organized as a directed pipeline in which the output of each subsystem is the input of the next, and this dependency is made explicit: every section opens with the quantity it receives from the preceding subsystem and closes with the quantity it produces for the following one. The reader can thus trace a single datum---a pixel, a depth sample, an encoder count---from the sensor that produces it, through estimation, mapping, planning, and control, to the wheel torque or servo pulse it ultimately influences.
+
+The order of the sections follows the flow of information rather than the layout of the hardware. Section~\ref{meth:sec:arch} establishes the distributed system architecture and the Robot Operating System~2 (ROS~2) interfaces that bind the modules together, and fixes where each computation runs. Section~\ref{meth:sec:perception} derives the measurement models of every sensor and the reference-frame algebra that places their data in a common world, ending with the wheel-encoder odometry that serves as the motion prior for localization. Section~\ref{meth:sec:slam} develops the dynamic visual simultaneous localization and mapping (SLAM) front end and back end that produce the global pose estimate. Section~\ref{meth:sec:nvblox} fuses the registered depth into a volumetric model and extracts the Euclidean distance field the navigator requires. Section~\ref{meth:sec:nav} plans and tracks collision-free motion of the base. Section~\ref{meth:sec:dyn} models the differential-drive dynamics and closes the wheel-velocity control loop that realizes the commanded motion.
+
+Section~\ref{meth:sec:manip} brings the manipulator to the socket and validates the insertion. Finally, Section~\ref{meth:sec:integration}, Section~\ref{meth:sec:dataflow}, and Section~\ref{meth:sec:ctrlsummary} close the chapter by describing how the subsystems run together as a distributed, rate-separated control system. Throughout, the governing equation is stated before its interpretation, and every model is derived in full rather than quoted. The differential-drive kinematics and dynamics were verified symbolically with a computer-algebra system before being committed to the text. Quantities that depend on a physical measurement not yet taken---principally the drive-wheel radius $r$ and the track width $L_t$---are carried as symbols, with the place for the measured value indicated explicitly.
+
+\begin{table}[!htb]
+\centering
+\caption{Principal reference frames and symbols used throughout the chapter.}
+\label{meth:tab:nomenclature}
+\footnotesize
+\begin{tabular}{@{}ll@{\quad}ll@{}}
+\toprule
+\multicolumn{2}{@{}l}{\textbf{Reference frames}} & \multicolumn{2}{l@{}}{\textbf{Principal symbols}}\\
+\midrule
+$\{W\}$ & world / \texttt{map} (fixed)            & $\xi=[v,\omega]\T$ & body twist (\texttt{/cmd\_vel})\\
+$\{O\}$ & \texttt{odom} (smooth, drifting)         & $\omega_R,\omega_L$ & right/left wheel rates\\
+$\{B\}$ & \texttt{base\_link} (axle midpoint)      & $r,\ L_t$ & wheel radius, track width\\
+$\{C\},\{C_o\}$ & camera, optical frame            & $K$ & camera intrinsic matrix\\
+$\{I\}$ & \texttt{imu\_link}                        & $Z,\ \vX$ & depth, 3-D point\\
+$\{A\},\{E\}$ & arm base, end-effector            & $D(\vx),\Phi(\vx)$ & TSDF, ESDF value\\
+$\{H\},\{P\}$ & eye-in-hand camera, plug tip      & $\bm{\tau}=[\tau_R,\tau_L]\T$ & wheel torques\\
+$\{S\}$ & socket / target                          & $\vq_a=[q_1,q_2,q_3]\T$ & arm joints\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A pose is represented by a homogeneous transformation $T^A_B=\left[\begin{smallmatrix}R^A_B & t^A_B\\ \mathbf 0\T & 1\end{smallmatrix}\right]\in\SE(3)$, with $R^A_B\in\SO(3)$, that maps a point expressed in frame $\{B\}$ to frame $\{A\}$ through $\mathbf p^A=T^A_B\,\mathbf p^B$. All frames follow the ROS convention (REP\,103): body axes are $x$ forward, $y$ left, $z$ up, whereas the camera optical frame has $z$ forward, $x$ right, $y$ down. The transformation tree that relates them is maintained as a single, time-stamped structure introduced in Section~\ref{meth:sec:perception}.
+
+
+
+\subsection{System Architecture}\label{meth:sec:arch}
+
+The preceding chapter fixed the task that this methodology must realize: an autonomous mobile manipulator that approaches a parked electric vehicle, perceives its charging port, and inserts a plug into the socket without human intervention. That specification leaves open one question that governs every downstream design choice---\emph{where each computation runs}. This section answers it: it commits to a distributed two-machine system, justifies the split on quantitative grounds, and fixes the node placement, reference frames, and message contract that bind the subsystems together, then hands the calibrated sensing interface to the perception stage of Section~\ref{meth:sec:perception}.
+
+\subsubsection{Distributed Two-Machine Decomposition}
+
+The platform carries two computers. A Raspberry~Pi~4, bolted to the differential-drive base, performs only sensor acquisition and actuator bridging: it runs the RealSense driver, the serial bridge to the PRIZM motor controller, and the \texttt{micro\_ros\_agent} that admits the ESP32 to the graph. All perception-grade computation---dynamic visual SLAM, volumetric mapping with nvblox, and Nav2 planning and control---executes on a laptop equipped with a CUDA-capable GPU. Sensor topics travel from the Pi to the laptop over a dedicated \ensuremath{5\,\mathrm{GHz}} WiFi link, and velocity commands return along the same channel. The entire stack is composed as a single ROS~2 graph whose nodes communicate through the DDS middleware, so that the physical split into two hosts is transparent to the application layer~\cite{macenski_2022_ros2}.
+
+Three considerations force this partition. The first is the compute budget. The SLAM backend, the nvblox truncated-signed-distance integration~\cite{millane2024nvblox}, and the learned manipulation policy are GPU-bound workloads; the Raspberry~Pi~4 exposes no CUDA device and a quad-core CPU that cannot sustain them at frame rate. The second is power, thermal headroom, and mass on a battery-powered base: a GPU-class processor would draw tens of watts and require active cooling and structural support that the mobile platform cannot spend, whereas the Pi draws only a few watts and dissipates passively. The third, and the one with hard real-time consequences, is loop locality. The wheel-level control and odometry loop must remain deterministic, so the encoder-to-motor protection path is kept entirely on the Pi and the PRIZM controller; only the comparatively slow navigation command \texttt{/cmd\_vel} is allowed to cross the wireless link.
+
+The locality argument is made precise by decomposing the end-to-end actuation latency,
+\begin{equation}\label{meth:eq:rtlatency}
+\tau_{\mathrm{rt}} \;=\; \tau_{\mathrm{acq}} + \tau_{\uparrow} + \tau_{\mathrm{comp}} + \tau_{\downarrow} + \tau_{\mathrm{act}},
+\end{equation}
+where $\tau_{\mathrm{acq}}$ is sensor acquisition, $\tau_{\uparrow}$ and $\tau_{\downarrow}$ are the uplink and downlink transport delays, $\tau_{\mathrm{comp}}$ is laptop computation, and $\tau_{\mathrm{act}}$ is actuation. The wireless terms $\tau_{\uparrow}+\tau_{\downarrow}$ are not merely additive but jittered: a contended \ensuremath{5\,\mathrm{GHz}} channel can momentarily inflate them by tens of milliseconds. A safety- or stability-critical wheel loop running at $f_w=\ensuremath{50\,\mathrm{Hz}}$ has a period $1/f_w=\ensuremath{20\,\mathrm{ms}}$ that the contended-channel jitter can exceed, so closing it across WiFi would be unsound; it is therefore closed locally, and \eqref{meth:eq:rtlatency} applies only to the navigation command, which is consumed at \ensuremath{10\text{--}20\,\mathrm{Hz}} and tolerates the residual delay.
+
+The second constraint is bandwidth. Streaming the RealSense color and aligned-depth images at their native resolution $W\!\times\!H=1280\!\times\!720$ and rate $f=\ensuremath{30\,\mathrm{Hz}}$, with $b_c=\ensuremath{3\,\mathrm{B}}$ per color pixel (\texttt{rgb8}) and $b_d=\ensuremath{2\,\mathrm{B}}$ per depth pixel (\texttt{16UC1}), produces a raw, uncompressed payload rate
+\begin{equation}\label{meth:eq:bandwidth}
+\dot{B} \;=\; f\,(W H)\,(b_c+b_d) \;=\; 30\times(921600)\times 5 \;\approx\; \ensuremath{138\,\mathrm{MB/s}} \;\equiv\; \ensuremath{1106\,\mathrm{Mb/s}}.
+\end{equation}
+This uncompressed baseline exceeds the practical goodput of a single \ensuremath{5\,\mathrm{GHz}} \mbox{802.11ac} link, which is why the architecture transmits images under best-effort DDS QoS with hardware-timestamped compression rather than uncompressed, and why no second high-rate image stream is round-tripped. The eye-in-hand color camera is consumed only by the manipulation stage and need not be streamed continuously during navigation. This host split confines high-rate acquisition and actuator bridging to the base while leaving GPU-intensive estimation and planning on the laptop.
+
+\subsubsection{Computation Graph and Physical Topology}
+
+At runtime, the ROS~2 computation graph traces publisher-to-topic-to-subscriber flow across the two hosts and the ESP32. The corresponding physical wiring connects the laptop to the Pi over WiFi, the Pi to the motor controller and ESP32 over serial and USB, and the ESP32 to the servo bus. The laptop reaches the Pi only over WiFi, and the Pi reaches the PRIZM controller over a serial line. The PRIZM drives the TorqueNADO gearmotors through an H-bridge and reads their quadrature encoders. The RealSense~D435i, the Logitech eye-in-hand camera, and the ESP32 all attach to the Pi over USB, and the ESP32 in turn commands the serial bus servos of the arm.
+
+\subsubsection{Topic Interface and the Bridging of Non-DDS Hardware}
+
+The contract that links the nodes is the set of topics enumerated in Table~\ref{meth:tab:topics}. Two hardware-bridging decisions determine which device appears in the graph as a first-class node and which does not. The PRIZM controller is an Arduino-class microcontroller that speaks only a fixed serial packet protocol and is too constrained to host a micro-ROS client and its DDS stack; it therefore never joins the graph directly. Instead, a custom \texttt{prizm\_bridge} node on the Pi translates between PRIZM serial packets and ROS~2 messages, integrating the TorqueNADO encoder counts into the wheel-odometry topic \texttt{/odom} and converting incoming \texttt{/cmd\_vel} twists into motor setpoints. The ESP32, by contrast, runs micro-ROS and joins the DDS graph as a genuine node through the \texttt{micro\_ros\_agent} on the Pi: it subscribes to \texttt{/arm/servo\_command} and publishes \texttt{/arm/servo\_feedback} and the \texttt{/plug/limit\_switch} signal that confirms full plug seating. This asymmetry---bridge for the PRIZM, agent for the ESP32---reflects only their compute envelopes, not their roles.
+
+\begin{table}[!htb]\centering
+\caption{ROS~2 topic interface. Hosts: \textbf{Pi}~=~Raspberry~Pi~4, \textbf{L}~=~laptop, \textbf{E}~=~ESP32. The PRIZM is not a ROS node; its data enter the graph through \texttt{prizm\_bridge} on the Pi. ($\ast$) custom message.}
+\label{meth:tab:topics}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Topic} & \textbf{Message type} & \textbf{Publisher (host)} & \textbf{Subscriber(s) (host)} \\
+\midrule
+\texttt{/\allowbreak{}camera/\allowbreak{}camera/\allowbreak{}color/\allowbreak{}image\_\allowbreak{}raw} & \texttt{sensor\_msgs/Image} & \texttt{realsense\_driver} (Pi) & \texttt{frontend}, \texttt{socket\_detector} (L) \\
+\texttt{/\allowbreak{}camera/\allowbreak{}camera/\allowbreak{}aligned\_\allowbreak{}depth\_\allowbreak{}to\_\allowbreak{}color/\allowbreak{}image\_\allowbreak{}raw} & \texttt{sensor\_msgs/Image} & \texttt{realsense\_driver} (Pi) & \texttt{nvblox\_node} (L) \\
+\texttt{/\allowbreak{}camera/\allowbreak{}camera/\allowbreak{}color/\allowbreak{}camera\_\allowbreak{}info} & \texttt{sensor\_msgs/CameraInfo} & \texttt{realsense\_driver} (Pi) & \texttt{frontend}, \texttt{nvblox\_node}, \texttt{socket\_detector} (L) \\
+\texttt{/camera/camera/imu} & \texttt{sensor\_msgs/Imu} & \texttt{realsense\_driver} (Pi) & \texttt{backend} (L) \\
+\texttt{/yolo/tracking} & \texttt{vision\_\allowbreak{}msgs/\allowbreak{}Detection2DArray} & \texttt{frontend} (L) & \texttt{backend} (L) \\
+\texttt{/frontend/keyframe} & \texttt{slam\_msgs/Keyframe}$^{\ast}$ & \texttt{frontend} (L) & \texttt{backend} (L) \\
+\texttt{/backend/trajectory} & \texttt{nav\_msgs/Path} & \texttt{backend} (L) & \texttt{mission\_fsm} (L) \\
+\texttt{/tf} & \texttt{tf2\_msgs/TFMessage} & \texttt{backend} (map$\to$odom), \texttt{prizm\_bridge} (odom$\to$base\_link) & all \\
+\texttt{/tf\_static} & \texttt{tf2\_msgs/TFMessage} & \texttt{robot\_state\_publisher} (L) & all \\
+\texttt{/odom} (PRIZM wheel odometry) & \texttt{nav\_msgs/Odometry} & \texttt{prizm\_bridge} (Pi) & \texttt{backend}, \texttt{controller\_server} (L) \\
+\texttt{/nvblox\_node/esdf} (costmap slice) & \texttt{nvblox\_\allowbreak{}msgs/\allowbreak{}DistanceMapSlice} & \texttt{nvblox\_node} (L) & \texttt{planner\_server}, \texttt{controller\_server} (L) \\
+\texttt{/plan} & \texttt{nav\_msgs/Path} & \texttt{planner\_server} (L) & \texttt{controller\_server} (L) \\
+\texttt{/cmd\_vel} & \texttt{geometry\_msgs/Twist} & \texttt{controller\_server} (L) & \texttt{prizm\_bridge} (Pi) \\
+\texttt{/arm/servo\_command} & \texttt{std\_\allowbreak{}msgs/\allowbreak{}Float32MultiArray} & \texttt{arm\_policy} (L) & \texttt{esp32} micro-ROS (E) \\
+\texttt{/arm/servo\_feedback} & \texttt{std\_\allowbreak{}msgs/\allowbreak{}Float32MultiArray} & \texttt{esp32} micro-ROS (E) & \texttt{arm\_bridge} (L) \\
+\texttt{/joint\_states} & \texttt{sensor\_msgs/JointState} & \texttt{arm\_bridge} (L) & \texttt{robot\_state\_publisher}, MoveIt (L) \\
+\texttt{/plug/limit\_switch} & \texttt{std\_msgs/Bool} & \texttt{esp32} micro-ROS (E) & \texttt{mission\_fsm} (L) \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The spatial relationships among these topics are organized by the transform tree, which follows the REP-105 convention. The SLAM backend publishes the \texttt{map}$\rightarrow$\texttt{odom} correction, \texttt{prizm\_bridge} publishes the high-rate \texttt{odom}$\rightarrow$\texttt{base\_link} wheel-odometry transform, and the static extrinsics fixing the camera and arm to the base---\texttt{base\_link}$\rightarrow$\texttt{camera\_link} and the optical frames \texttt{camera\_\allowbreak{}color\_\allowbreak{}optical\_\allowbreak{}frame}, \texttt{camera\_\allowbreak{}depth\_\allowbreak{}optical\_\allowbreak{}frame}, \texttt{camera\_\allowbreak{}imu\_\allowbreak{}optical\_\allowbreak{}frame}, together with \texttt{base\_link}$\rightarrow$\texttt{arm\_base}$\rightarrow$\texttt{end\_effector}$\rightarrow$\texttt{plug\_tip}---are emitted on \texttt{/tf\_static} from the robot description. Localization thus resolves any sensor reading into a common metric frame, and the Nav2 planner and controller operate in \texttt{map} while the wheel loop operates in \texttt{odom}, decoupling global consistency from local smoothness exactly as the latency argument of \eqref{meth:eq:rtlatency} requires~\cite{macenski_2020_nav2}.
+
+\subsubsection{Handoff to Perception}
+
+The perception stage of Section~\ref{meth:sec:perception} consumes a fixed interface: the calibrated sensor topics \texttt{/\allowbreak{}camera/\allowbreak{}camera/\allowbreak{}color/\allowbreak{}image\_\allowbreak{}raw}, \texttt{/\allowbreak{}camera/\allowbreak{}camera/\allowbreak{}aligned\_\allowbreak{}depth\_\allowbreak{}to\_\allowbreak{}color/\allowbreak{}image\_\allowbreak{}raw}, \texttt{/\allowbreak{}camera/\allowbreak{}camera/\allowbreak{}color/\allowbreak{}camera\_\allowbreak{}info}, and \texttt{/camera/camera/imu}, all published by the \texttt{realsense\_driver} on the Pi and carried over the WiFi-spanned DDS graph; the transform tree rooted at \texttt{map} with the camera optical frames and their static extrinsics to \texttt{base\_link}; and the placement contract that locates acquisition on the Pi and every estimation node---beginning with the dynamic visual SLAM frontend and its YOLO-based dynamic-object tracker~\cite{redmon2016yolo}---on the laptop. The next section turns this raw, time-synchronized, intrinsically calibrated stream into the feature tracks and dynamic-object masks consumed by localization.
+
+
+\subsection{Perception}\label{meth:sec:perception}
+
+The system-overview stage established the physical platform---a differential-drive mobile base carrying a serial manipulator---and a set of intrinsically and extrinsically calibrated, hardware-time-stamped sensor streams published on named ROS~2 topics, each expressed in a declared coordinate frame. This section converts those calibrated streams into the geometric quantities that downstream estimation requires. It takes the raw RGB image, the active-stereo depth image, the inertial measurements, the wheel-encoder counts, and the plug limit-switch state. From these it produces (i) a metric interpretation of the visual data through the pinhole and back-projection models, (ii) a propagation-ready inertial model, and (iii) a closed-form wheel-odometry pose that serves as the motion prior for the SLAM front end of the next section. Each sensor is presented with its measurement model first, followed by its noise characterization, sampling rate, reference frame, and the practical advantages and limitations that motivate how it is fused.
+
+\subsubsection{Reference Frames and Rigid-Body Transforms}
+
+All spatial reasoning is carried out in a fixed hierarchy of right-handed Cartesian frames connected by the transform tree of Figure~\ref{meth:fig:tftree}. The map frame $\{W\}$ is the inertial world frame in which global goals are expressed; the odom frame $\{O\}$ is a locally smooth integration frame; $\{B\}$ is \texttt{base\_link}, rigidly attached to the mobile base at the midpoint of the drive axle; $\{C\}$ is \texttt{camera\_link} and $\{Co\}$ its associated optical frame \texttt{camera\_\allowbreak{}color\_\allowbreak{}optical\_\allowbreak{}frame}; $\{I\}$ is the IMU frame \texttt{imu\_link}; and the manipulator is rooted at \texttt{arm\_base}. A point is moved between frames by a homogeneous transform $T^{A}_{B}\in\SE(3)$,
+\begin{equation}
+\tilde{\vX}^{A} = T^{A}_{B}\,\tilde{\vX}^{B},
+\qquad
+T^{A}_{B} =
+\begin{bmatrix} R^{A}_{B} & \vt^{A}_{B} \\[2pt] \mathbf{0}^{\T} & 1 \end{bmatrix},
+\qquad R^{A}_{B}\in\SO(3),\ \vt^{A}_{B}\in\R^{3},
+\label{meth:eq:se3}
+\end{equation}
+where $\tilde{\vX}=[\vX^{\T},1]^{\T}$ denotes homogeneous coordinates, $R^{A}_{B}$ is the rotation carrying frame-$B$ axes into frame-$A$ axes, and $\vt^{A}_{B}$ is the origin of $\{B\}$ expressed in $\{A\}$. Transforms compose by matrix multiplication, $T^{A}_{C}=T^{A}_{B}T^{B}_{C}$. They invert as $\big(T^{A}_{B}\big)^{-1}=T^{B}_{A}$, with $R^{B}_{A}=R^{A\,\T}_{B}$ and $\vt^{B}_{A}=-R^{A\,\T}_{B}\vt^{A}_{B}$. The rigid structure of \eqref{meth:eq:se3} guarantees that both operations remain in $\SE(3)$.
+
+The defining feature of the tree is the deliberate split of the global pose into two cascaded edges. The static, calibration-derived edges below \texttt{base\_link}---$T^{B}_{C}$, $T^{C}_{Co}$, $T^{B}_{I}$, and the transform to \texttt{arm\_base}---are fixed extrinsics measured once and held constant. The two edges above \texttt{base\_link} are estimated online and behave very differently. The $T^{O}_{B}$ edge is produced by dead reckoning (Section~\ref{meth:sec:perception} develops it from wheel odometry and inertial data) and is therefore \emph{continuous and differentiable in time but slowly drifting}, which makes it suitable for short-horizon control and local planning. The $T^{W}_{O}$ edge is supplied by the SLAM back end and is \emph{globally consistent but discontinuous}: when a loop closure is accepted, the map$\rightarrow$odom transform is corrected by a finite jump that snaps the global estimate back onto the map without ever perturbing the smooth odom$\rightarrow$base\_link signal that the controllers consume. This convention, standard in mobile-robot navigation stacks \cite{siegwart2011mobile}, lets the perception layer expose a drift-free global pose and a jump-free local pose simultaneously.
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[node distance=7mm and 13mm, every node/.style={font=\footnotesize}]
+  \node[state, align=center] (map)  {$\{W\}$\\\texttt{map}};
+  \node[state, align=center, right=of map]  (odom) {$\{O\}$\\\texttt{odom}};
+  \node[state, align=center, right=of odom] (base) {$\{B\}$\\\texttt{base\_link}};
+  \node[box, align=center, right=of base]   (cam)  {$\{C\}$\\\texttt{camera\_link}};
+  \node[box, align=center, above=of cam]    (imu)  {$\{I\}$\\\texttt{imu\_link}};
+  \node[box, align=center, below=of cam]    (arm)  {\texttt{arm\_base}};
+  \node[box, align=center, right=of cam]    (opt)  {$\{Co\}$\\\texttt{optical}};
+  \draw[darr] (map) -- node[lbl, above]{global} node[lbl, below]{} (odom);
+  \draw[arr]  (odom) -- node[lbl, above]{smooth} node[lbl, below]{drifts} (base);
+  \draw[arr]  (base) -- (cam);
+  \draw[arr]  (base) -- (imu);
+  \draw[arr]  (base) -- (arm);
+  \draw[arr]  (cam)  -- (opt);
+\end{tikzpicture}
+\caption{Transform (TF) tree. Solid edges are estimated or static-rigid; the dashed \texttt{map}$\rightarrow$\texttt{odom} edge is corrected discontinuously by SLAM loop closures, whereas \texttt{odom}$\rightarrow$\texttt{base\_link} is the smooth, slowly drifting dead-reckoned pose $T^{O}_{B}$. Static extrinsics below \texttt{base\_link} are fixed by calibration.}
+\label{meth:fig:tftree}
+\end{figure}
+
+Before treating the sensors individually, this section fixes their sampling rates and native frames, since these dictate how the streams are time-aligned: the RGB image is published at \ensuremath{30\,\mathrm{Hz}} in the optical frame $\{Co\}$; the metric depth image at \ensuremath{30\,\mathrm{Hz}}, also referenced to $\{Co\}$; the inertial measurement unit (IMU) at \ensuremath{200\text{--}400\,\mathrm{Hz}} in $\{I\}$; the wheel encoders at the controller rate of \ensuremath{50\,\mathrm{Hz}} in $\{B\}$; and the plug limit switch as an asynchronous event on state change, attached to the end-effector. The remainder of this section makes each model explicit.
+
+\subsubsection{Visual Sensing: RGB Projection and Metric Depth}
+
+\paragraph{RGB projection (RealSense D435i color stream).}
+The color camera is modeled as an ideal pinhole. For a scene point $\vX^{W}=[X,Y,Z]^{\T}$ expressed in $\{W\}$ and seen by a camera with extrinsics $[R\mid \vt]=T^{Co}_{W}$, the projection onto pixel $\vu=[u,v]^{\T}$ is
+\begin{equation}
+s\,\tilde{\vu} = K\,[\,R \mid \vt\,]\,\tilde{\vX}^{W},
+\qquad
+K =
+\begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix},
+\label{meth:eq:projection}
+\end{equation}
+where $s>0$ is the projective depth scale, $K$ is the intrinsic matrix with focal lengths $f_x,f_y$ in pixels and principal point $(c_x,c_y)$, and the multiplication is in homogeneous coordinates \cite{hartley2004mvg}. Resolving the scale $s=Z_c$ (the depth of the point in the optical frame) yields the compact perspective map $\pi:\R^{3}\!\to\!\R^{2}$,
+\begin{equation}
+\vu = \pi(\vX^{Co}) =
+\Big(\,f_x \tfrac{X_c}{Z_c} + c_x,\ \ f_y \tfrac{Y_c}{Z_c} + c_y\,\Big)^{\!\T},
+\qquad \vX^{Co}=R\,\vX^{W}+\vt,
+\label{meth:eq:pi}
+\end{equation}
+which shows that projection discards the radial scale and is therefore not invertible from a single image without an independent depth. The optical frame $\{Co\}$ follows the standard convention with $+Z_c$ along the boresight, $+X_c$ to the right, and $+Y_c$ downward, so the static rotation $R^{C}_{Co}$ relates it to the $x$-forward \texttt{camera\_link}. The dominant pixel-noise term after calibration is the localization uncertainty of detected features, modeled as zero-mean Gaussian $\vn_{\vu}\sim\mathcal{N}(\mathbf{0},\sigma_{\vu}^{2}I)$ on $\vu$. The RGB stream is information-dense and runs at low latency, which makes it ideal for appearance-based feature extraction and place recognition; its limitation is that \eqref{meth:eq:projection} couples geometry with the unknown scale $s$, so monocular color alone cannot resolve metric structure.
+
+\paragraph{Metric depth (active IR stereo with projector).}
+The metric scale missing from \eqref{meth:eq:projection} is supplied by the depth stream. The D435i recovers per-pixel depth $Z$ by triangulating its two infrared imagers, whose effective horizontal disparity $d$ relates to depth through the rectified-stereo relation $Z = f_x b / d$, with $b$ the stereo baseline; a class-A pseudo-random IR pattern from the onboard projector adds texture so that disparity can be matched even on bland surfaces. Given $Z$ at pixel $\vu$, the corresponding point is recovered by inverting the intrinsics, the back-projection
+\begin{equation}
+\vX^{Co} = Z\,K^{-1}\tilde{\vu}
+= Z
+\begin{bmatrix}
+(u-c_x)/f_x \\[2pt]
+(v-c_y)/f_y \\[2pt]
+1
+\end{bmatrix},
+\label{meth:eq:backproj}
+\end{equation}
+which is exactly the inverse of \eqref{meth:eq:pi} with the scale restored. Differentiating the rectified-stereo relation $Z=f_x b / d$ with respect to the disparity $d$ gives the depth sensitivity,
+\begin{equation}
+\frac{\partial Z}{\partial d} = -\frac{f_x b}{d^{2}} = -\frac{Z^{2}}{f_x b},
+\qquad\Longrightarrow\qquad
+\sigma_Z \;\approx\; \frac{Z^{2}}{f_x b}\,\sigma_d,
+\label{meth:eq:depthnoise}
+\end{equation}
+so the standard deviation of the depth estimate grows quadratically with range for a fixed sub-pixel disparity uncertainty $\sigma_d$. This $\sigma_Z\!\propto\!Z^{2}$ law is the defining limitation of active stereo and is the reason the usable working band is restricted to roughly \ensuremath{0.3\text{--}3\,\mathrm{m}}: below \ensuremath{0.3\,\mathrm{m}} the stereo pair has no overlap, and beyond a few meters the quadratic term in \eqref{meth:eq:depthnoise} renders depth too noisy for fine manipulation. Within that band, however, \eqref{meth:eq:backproj} turns every valid pixel into a metric 3-D point in $\{Co\}$, providing the dense geometry that anchors both mapping and the visually guided approach to the charging socket. The combination of \eqref{meth:eq:projection} and \eqref{meth:eq:backproj}---photometric appearance with metric depth---is the RGB-D pairing whose accuracy is characterized on standard trajectories by Sturm \emph{et al.} \cite{sturm_2012_rgbd_benchmark}.
+
+\subsubsection{Inertial Sensing}
+
+The IMU provides high-rate measurements of the base's specific force and angular rate. Writing $\bm{a}$ for the kinematic acceleration of the body in the world frame, $\bm{g}$ for the gravity vector, and $\bm{\omega}$ for the body angular velocity, the strapdown model is
+\begin{equation}
+\begin{aligned}
+\bm{a}_{\mathrm{meas}} &= R_{IB}^{\T}\big(\bm{a}-\bm{g}\big) + \bm{b}_{a} + \bm{n}_{a},\\[2pt]
+\bm{\omega}_{\mathrm{meas}} &= \bm{\omega} + \bm{b}_{g} + \bm{n}_{g},
+\end{aligned}
+\label{meth:eq:imu}
+\end{equation}
+where $R_{IB}$ rotates body-frame vectors into the IMU frame, $\bm{b}_{a},\bm{b}_{g}$ are slowly varying accelerometer and gyroscope biases, and $\bm{n}_{a},\bm{n}_{g}$ are zero-mean white measurement noises with covariances $\sigma_{a}^{2}I$ and $\sigma_{g}^{2}I$. The accelerometer senses \emph{specific force}, i.e.\ kinematic acceleration minus gravity expressed in the sensor frame, which is why \eqref{meth:eq:imu} subtracts $\bm{g}$ before rotation; at rest this leaves the reaction to gravity and so provides an absolute roll-and-pitch reference, while the gyroscope integrates to relative heading. The biases are not constant but follow a random walk driven by white noise,
+\begin{equation}
+\dot{\bm{b}}_{a} = \bm{n}_{ba},\qquad
+\dot{\bm{b}}_{g} = \bm{n}_{bg},
+\label{meth:eq:biaswalk}
+\end{equation}
+with $\bm{n}_{ba}\sim\mathcal{N}(\mathbf{0},\sigma_{ba}^{2}I)$ and $\bm{n}_{bg}\sim\mathcal{N}(\mathbf{0},\sigma_{bg}^{2}I)$; the bias must be co-estimated online, since an uncompensated bias integrates into unbounded position drift. The IMU is sampled at \ensuremath{200\text{--}400\,\mathrm{Hz}} in $\{I\}$. Its advantage is that it observes motion the wheels cannot---out-of-plane tilt, vibration, and rapid yaw transients---and it bridges the latency between slower exteroceptive updates. Its limitation is the double integration of \eqref{meth:eq:imu}: without an external reference, accelerometer noise and the bias walk of \eqref{meth:eq:biaswalk} cause the integrated pose to diverge, so the IMU is valuable only when fused with the odometric and visual constraints that bound its drift.
+
+\subsubsection{Proprioceptive Sensing: Wheel Encoders and the Contact Switch}
+
+\paragraph{Wheel encoders.}
+Each drive wheel carries a quadrature encoder that emits incremental counts as the wheel turns. With a quadrature resolution of $1440$ counts per revolution---equivalently \ensuremath{0.25^{\circ}} of wheel rotation per count---a measured count increment $\Delta N$ maps to a wheel-angle increment by
+\begin{equation}
+\Delta\theta_{\mathrm{wheel}} = \frac{2\pi\,\Delta N}{1440},
+\label{meth:eq:encres}
+\end{equation}
+which is exact by construction: $360^{\circ}/1440=\ensuremath{0.25^{\circ}}$, and converting to radians gives the factor $2\pi/1440\approx\ensuremath{4.363e-3\,\mathrm{rad}}$ per count. Applying \eqref{meth:eq:encres} to the left and right wheels over a control interval yields per-wheel rotations $\Delta\varphi_{L},\Delta\varphi_{R}$, and multiplying by the wheel radius $r$ gives the arc lengths $\Delta s_{L}=r\,\Delta\varphi_{L}$ and $\Delta s_{R}=r\,\Delta\varphi_{R}$ travelled by each wheel contact point. These increments are the raw material of the odometry derived below. The encoder count is quantized rather than Gaussian, so its uncertainty is dominated by the $\pm\tfrac{1}{2}$-count resolution of \eqref{meth:eq:encres} together with unmodeled wheel slip. Sampled in $\{B\}$ at the \ensuremath{50\,\mathrm{Hz}} controller rate, the encoder is precise and inexpensive over short intervals. Because it cannot observe lateral slip, however, it accumulates heading error, which is why it is later fused with the IMU and visual SLAM.
+
+\paragraph{Plug limit switch.}
+Seating of the charging plug is confirmed by a normally-open contact switch at the connector that closes when the plug bottoms in the socket. It returns a binary observation $b\in\{0,1\}$ obtained by thresholding the contact event,
+\begin{equation}
+b = \mathbf{1}\!\left[\,\text{contact closed}\,\right],
+\qquad
+\Pr(b=1\mid \text{seated}) = 1-\varepsilon_{\mathrm{fn}},\quad
+\Pr(b=1\mid \text{not seated}) = \varepsilon_{\mathrm{fp}},
+\label{meth:eq:switch}
+\end{equation}
+i.e.\ a Bernoulli observation whose false-negative and false-positive rates $\varepsilon_{\mathrm{fn}},\varepsilon_{\mathrm{fp}}$ capture switch bounce and partial seating. Its advantage is an unambiguous, near-zero-latency terminal signal for the insertion controller that no vision or proprioception can match at the moment of mechanical engagement; its limitation is that it is purely terminal---it conveys no continuous error and therefore cannot guide the approach, only certify its completion.
+
+\subsubsection{Differential-Drive Wheel Odometry}
+
+The encoder increments are now turned into the pose prior that the SLAM front end consumes. The mobile base is a differential drive whose two wheels, of radius $r$, are mounted on a common axle of track width $L_t$ at $\pm L_t/2$ from \texttt{base\_link} (Figure~\ref{meth:fig:diffdrive}). For wheel angular velocities $\omega_R,\omega_L$, the body forward velocity $v$ and yaw rate $\omega$ follow from the rolling-without-slipping condition at each wheel,
+\begin{equation}
+v = \frac{r}{2}\,(\omega_R + \omega_L),
+\qquad
+\omega = \frac{r}{L_t}\,(\omega_R - \omega_L),
+\label{meth:eq:fk}
+\end{equation}
+
+\begin{equation}
+\dot{x} = v\cos\theta,
+\qquad
+\dot{y} = v\sin\theta,
+\qquad
+\dot{\theta} = \omega,
+\label{meth:eq:unicycle}
+\end{equation}
+which expresses the central restriction of a wheeled base: the body can translate only along its heading. That restriction is the nonholonomic (no lateral-slip) constraint
+\begin{equation}
+\dot{x}\sin\theta - \dot{y}\cos\theta = 0,
+\label{meth:eq:nonholo}
+\end{equation}
+verified directly by substituting \eqref{meth:eq:unicycle}: $\dot{x}\sin\theta-\dot{y}\cos\theta = v\cos\theta\sin\theta - v\sin\theta\cos\theta = 0$. Because \eqref{meth:eq:nonholo} is non-integrable, it constrains the velocities without reducing the configuration dimension, and any pose estimator built on this base must respect it.
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[>={Latex}, font=\footnotesize]
+  \coordinate (C) at (0,0);
+  \coordinate (ICC) at (0,3);
+  \draw[dashed, gray] (0,-1.35) -- (0,1.35);                 % drive axle
+  \draw[rounded corners=2pt, thick] (-1.0,-1.1) rectangle (1.0,1.1); % body
+  \draw[fill=black!12] (-0.32,0.78) rectangle (0.32,1.02);   % left wheel
+  \draw[fill=black!12] (-0.32,-1.02) rectangle (0.32,-0.78); % right wheel
+  \node at (0.62,0.9) {$r$};
+  \draw[->, thick] (C) -- (1.75,0) node[below right] {$x_B,\,v$};
+  \draw[->, thick] (C) -- (0,1.6)  node[above right] {$y_B$};
+  \fill (C) circle (1.6pt) node[below left] {$B$};
+  \draw[darr] (C) -- (ICC) node[midway, right] {$R_{\mathrm{icc}}=\dfrac{v}{\omega}$};
+  \fill (ICC) circle (1.8pt) node[above] {ICC};
+  \draw[dashed] ([shift=(250:3)]ICC) arc (250:290:3);        % path
+  \draw[<->] (1.25,-0.9) -- (1.25,0.9) node[midway, right] {$L_t$};
+  \draw[dashed, gray] (0.32,0.9) -- (1.25,0.9);
+  \draw[dashed, gray] (0.32,-0.9) -- (1.25,-0.9);
+  \draw[->] (0.45,0.0) arc (0:140:0.45);
+  \node at (-0.12,0.62) {$\omega$};
+\end{tikzpicture}
+\caption{Differential-drive geometry. Wheels of radius $r$ sit on the drive axle at $\pm L_t/2$ from \texttt{base\_link} ($B$). For nonzero yaw rate the body rotates about the instantaneous center of curvature (ICC) at signed turn radius $R_{\mathrm{icc}}=v/\omega$; the dashed arc is the resulting constant-curvature path.}
+\label{meth:fig:diffdrive}
+\end{figure}
+
+To integrate \eqref{meth:eq:unicycle} over one control step, the inputs $(v,\omega)$ are held constant, so the base follows a constant-curvature arc about the instantaneous center of curvature at signed radius $R_{\mathrm{icc}}=v/\omega$ (Figure~\ref{meth:fig:diffdrive}). Defining the step arc length $\Delta s_c = v\,\Delta t = \tfrac{1}{2}(\Delta s_R+\Delta s_L)$ and the heading change $\Delta\theta = \omega\,\Delta t = (\Delta s_R-\Delta s_L)/L_t$---the discrete counterparts of \eqref{meth:eq:fk} expressed directly in the encoder arc lengths---the exact closed-form update for $\Delta\theta\neq 0$ is obtained by integrating \eqref{meth:eq:unicycle} along the arc:
+\begin{equation}
+\begin{aligned}
+x_{k+1} &= x_k + \frac{\Delta s_c}{\Delta\theta}\big(\sin(\theta_k+\Delta\theta) - \sin\theta_k\big),\\[2pt]
+y_{k+1} &= y_k + \frac{\Delta s_c}{\Delta\theta}\big(\cos\theta_k - \cos(\theta_k+\Delta\theta)\big),\\[2pt]
+\theta_{k+1} &= \theta_k + \Delta\theta .
+\end{aligned}
+\label{meth:eq:odom-exact}
+\end{equation}
+In the straight-line limit $\Delta\theta\!\to\!0$ the ratio $\Delta s_c/\Delta\theta\!\to\!R_{\mathrm{icc}}$ remains finite and \eqref{meth:eq:odom-exact} reduces to $x_{k+1}=x_k+\Delta s_c\cos\theta_k$, $y_{k+1}=y_k+\Delta s_c\sin\theta_k$, so the model is well posed for both turning and forward motion. Because evaluating \eqref{meth:eq:odom-exact} on an embedded controller requires a division by $\Delta\theta$ that is ill-conditioned near zero, it is common to use instead the midpoint (second-order Runge--Kutta) approximation, which evaluates the heading once at the center of the step:
+\begin{equation}
+\begin{aligned}
+x_{k+1} &= x_k + \Delta s_c\,\cos\!\big(\theta_k + \tfrac{1}{2}\Delta\theta\big),\\[2pt]
+y_{k+1} &= y_k + \Delta s_c\,\sin\!\big(\theta_k + \tfrac{1}{2}\Delta\theta\big),\\[2pt]
+\theta_{k+1} &= \theta_k + \Delta\theta .
+\end{aligned}
+\label{meth:eq:odom-mid}
+\end{equation}
+The accuracy of \eqref{meth:eq:odom-mid} is quantified by comparing it term-by-term with \eqref{meth:eq:odom-exact}. Using the identity $\sin(\theta_k+\Delta\theta)-\sin\theta_k = 2\cos\!\big(\theta_k+\tfrac{\Delta\theta}{2}\big)\sin\!\big(\tfrac{\Delta\theta}{2}\big)$, the exact $x$-increment factors as
+\begin{equation}
+\Delta x_{\mathrm{exact}}
+= \Delta s_c\,\cos\!\Big(\theta_k+\tfrac{\Delta\theta}{2}\Big)\,
+\frac{\sin(\Delta\theta/2)}{\Delta\theta/2}
+= \Delta s_c\,\cos\!\Big(\theta_k+\tfrac{\Delta\theta}{2}\Big)\Big(1 - \frac{\Delta\theta^{2}}{24} + \mathcal{O}(\Delta\theta^{4})\Big),
+\label{meth:eq:odom-expand}
+\end{equation}
+whereas the midpoint rule retains only the leading factor $\Delta x_{\mathrm{mid}} = \Delta s_c\cos(\theta_k+\tfrac{\Delta\theta}{2})$. Subtracting, and evaluating the slowly varying cosine at $\theta_k$ to leading order, gives the truncation error
+\begin{equation}
+\Delta x_{\mathrm{exact}} - \Delta x_{\mathrm{mid}}
+= -\frac{1}{24}\,\Delta s_c\,\cos\theta_k\,\Delta\theta^{2} + \mathcal{O}(\Delta\theta^{4}),
+\label{meth:eq:odom-err}
+\end{equation}
+with the analogous $-\tfrac{1}{24}\Delta s_c\sin\theta_k\,\Delta\theta^{2}$ for the $y$-component. The midpoint update is therefore third-order accurate per step in the heading change: it is exact for straight motion ($\Delta\theta=0$) and accumulates appreciable error only under simultaneously large step length and large per-step rotation, a regime avoided at the \ensuremath{50\,\mathrm{Hz}} update rate where $\Delta\theta$ is small. The resulting pose $(x_k,y_k,\theta_k)$ assembles into the planar rigid transform
+\begin{equation}
+T^{O}_{B} =
+\begin{bmatrix}
+\cos\theta_k & -\sin\theta_k & x_k \\
+\sin\theta_k & \phantom{-}\cos\theta_k & y_k \\
+0 & 0 & 1
+\end{bmatrix}\in\SE(2)\subset\SE(3),
+\label{meth:eq:odom-pose}
+\end{equation}
+the smooth, drifting odom$\rightarrow$base\_link edge introduced in Figure~\ref{meth:fig:tftree}.
+
+This pose closes the perception stage. Downstream estimation now receives a frame-consistent observation set: the calibrated RGB image $I(\vu)$ and its pinhole model \eqref{meth:eq:projection}; the metric depth $Z(\vu)$ with its back-projection \eqref{meth:eq:backproj}; the inertial stream of \eqref{meth:eq:imu}; and, as the central motion prior, the wheel-odometry pose $T^{O}_{B}$ of \eqref{meth:eq:odom-pose}, integrated by the verified midpoint update \eqref{meth:eq:odom-mid}. These quantities are handed to the SLAM and state-estimation front end of the following section, where $T^{O}_{B}$ serves as the smooth prediction that visual and inertial constraints correct into a globally consistent estimate of $T^{W}_{B}$.
+
+
+\subsection{Dynamic Visual SLAM}\label{meth:sec:slam}
+
+The sensing subsystem hands this stage a time-synchronized stream of RGB images, per-pixel metric depth registered into the color frame, an inertial measurement stream, and a low-rate odometry prior. From this stream the localization core must answer the single question on which everything downstream depends: \emph{where is the robot in the world}. It must answer continuously and in real time, in scenes that are not static, where people walk around a parked vehicle, doors swing, and other vehicles move. The estimator therefore cannot assume a rigid world, the assumption that classical visual odometry makes. The module described here is a dynamic visual SLAM pipeline that estimates the camera-optical pose $T^{W}_{Co}\in\SE(3)$ relative to a fixed world frame $W$, rejects measurements that originate on moving objects, and refines the trajectory over a sliding window of recent keyframes. Architecturally it follows the now-standard frontend--backend split popularized by ORB-SLAM \cite{murartal_2015_orbslam,campos_2021_orbslam3}: a lightweight \emph{frontend} that runs at camera rate and produces a pose per frame, and a slower \emph{backend} that periodically re-optimizes the recent map. Figure~\ref{meth:fig:slampipe} shows the two halves and the data that flows between them.
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[font=\scriptsize, node distance=5mm and 6mm]
+% Frontend row
+\node[data] (in) {RGB\,+\,depth\\(+\,IMU, odom prior)};
+\node[proc, right=of in] (orb) {ORB extract\\1000 kp, 8 levels};
+\node[proc, right=of orb] (gate) {Depth gate\\0.3--\ensuremath{3.0\,\mathrm{m}}};
+\node[proc, right=of gate] (match) {BF match\\Hamming $<50$};
+\node[proc, right=of match] (pnp) {PnP RANSAC\\\ensuremath{4\,\mathrm{px}}, motion gate};
+% Keyframe decision
+\node[data, below=8mm of pnp] (kf) {Keyframe?\\matches $<150$ / $>30$ fr};
+% Backend row
+\node[proc, below=8mm of match] (assoc) {Data association\\+ triangulation};
+\node[proc, left=of assoc] (ba) {Sliding-window BA\\Ceres LM\,+\,Schur};
+\node[data, left=of ba] (db) {Landmark DB\\10-KF window};
+\node[topic, left=of db] (out) {/tf,\ /odom\\\ensuremath{30\,\mathrm{Hz}}};
+% Frontend arrows
+\draw[arr] (in)--(orb);
+\draw[arr] (orb)--(gate);
+\draw[arr] (gate)--(match);
+\draw[arr] (match)--(pnp);
+\draw[arr] (pnp)--(kf);
+\draw[arr] (assoc)--(ba);
+\draw[arr] (ba)--(db);
+\draw[arr] (db)--(out);
+% Feedback
+\draw[darr] (ba) to[out=120,in=-90] node[lbl,midway,right]{pose prior} (match.south);
+\end{tikzpicture}
+\caption{Dynamic visual SLAM pipeline. The frontend (top) runs at camera rate: ORB extraction, the metric depth gate, brute-force Hamming matching, and depth-aided \mbox{PnP}/RANSAC produce a per-frame pose and decide whether the frame becomes a keyframe. The backend (bottom) associates keyframe observations, triangulates new landmarks, and re-optimizes the 10-keyframe window by sparse bundle adjustment; the refined map seeds the next frame and is published as TF and odometry. Dynamic observations are culled before matching (Equation~\eqref{meth:eq:ba}).}
+\label{meth:fig:slampipe}
+\end{figure}
+
+\subsubsection{Feature Extraction and Description}
+
+The frontend reduces each image to a sparse set of repeatable keypoints with binary descriptors using ORB \cite{rublee2011orb}, which combines a FAST corner detector \cite{rosten2006fast} with a rotation-steered BRIEF descriptor \cite{calonder2010brief}. A pixel is declared a corner when a contiguous arc of the sixteen pixels on a Bresenham circle of radius three around it are all brighter, or all darker, than the center by a threshold. The implementation begins at an intensity threshold of $20$ and relaxes to $7$ where a cell is texture-poor, so that even weakly contrasted regions contribute keypoints. Scale invariance is obtained by repeating detection over an image pyramid of eight levels with scale factor $1.2$, so a feature is found whether the camera is near or far from the structure that generated it.
+
+To avoid the well-known clustering of FAST corners on high-contrast edges, detections are spread across the frame by recursive quadtree subdivision: each cell is split until it holds a single retained corner, and the strongest corner per cell survives, yielding an approximately uniform spatial distribution of the budgeted $1000$ keypoints. Each retained keypoint is assigned an orientation from the intensity centroid of its patch, and a $256$-bit descriptor is computed by steering the BRIEF sampling pattern by that orientation, so that the descriptor is invariant to in-plane rotation. Because the descriptor is binary, the distance between two descriptors is the Hamming distance---a population count of their XOR---which is a single hardware instruction. This property is what makes real-time matching of thousands of features feasible.
+
+\subsubsection{Projective Geometry and Two-View Constraints}
+
+All geometric reasoning rests on the pinhole projection of a world point into a pixel. For a landmark $\vX_j\in\R^3$ expressed in homogeneous coordinates $\tilde{\vX}_j$, observed in keyframe $i$ whose pose maps world points into the camera-optical frame by $T^{Co_i}_{W}\in\SE(3)$, the reprojection residual is
+\begin{equation}
+\vr_{ij} \;=\; \vu_{ij} \;-\; \pi\!\big(K,\,T^{Co_i}_{W}\,\tilde{\vX}_j\big),
+\qquad
+\pi(K,\vP) \;=\; \frac{1}{P_z}\begin{bmatrix} f_x P_x + c_x P_z \\[2pt] f_y P_y + c_y P_z \end{bmatrix},
+\label{meth:eq:reproj}
+\end{equation}
+where $\vu_{ij}$ is the measured pixel, $\vP=(P_x,P_y,P_z)^{\T}$ is the landmark in the camera frame, $K$ is the intrinsic matrix with focal lengths $f_x,f_y$ and principal point $(c_x,c_y)$, and the division by $P_z$ is the perspective projection. Equation~\eqref{meth:eq:reproj} is the single error term that every pose-estimation stage of this section minimizes, and the pipeline as a whole is a succession of increasingly accurate methods for driving $\vr_{ij}$ toward zero. Its inverse, the back-projection $\vX = Z\,K^{-1}[u,v,1]^{\T}$ of a pixel with measured depth $Z$, is how the depth channel turns a feature into a metric landmark.
+
+When the same scene point is seen from two views, the two pixels are not independent: they are tied by the epipolar constraint. With $\vx$ and $\vx'$ the homogeneous pixel coordinates of a correspondence in the first and second view,
+\begin{equation}
+\vx'^{\T}\,F\,\vx \;=\; 0,
+\label{meth:eq:epipolar}
+\end{equation}
+where the fundamental matrix $F\in\R^{3\times3}$, of rank two, encodes the relative geometry in pixel units. Geometrically, $F\vx$ is the epipolar line in the second image on which the match $\vx'$ must lie, so \eqref{meth:eq:epipolar} states that a true correspondence lies on its epipolar line. The frontend exploits exactly this. After brute-force descriptor matching with a Hamming-distance acceptance threshold below $50$, putative correspondences are filtered by estimating $F$ with RANSAC at a $2$-pixel Sampson reprojection tolerance, and matches whose epipolar error exceeds the threshold are discarded. Removing the intrinsics from \eqref{meth:eq:epipolar} yields the calibrated form. Writing $\hat{\vx}=K^{-1}\vx$ for normalized image coordinates, the essential matrix $E$ satisfies
+\begin{equation}
+E \;=\; [\vt]_{\times}\,R,
+\qquad
+\hat{\vx}'^{\T}\,E\,\hat{\vx} \;=\; 0,
+\qquad
+F \;=\; K^{-\T}\,E\,K^{-1},
+\label{meth:eq:essential}
+\end{equation}
+where $R\in\SO(3)$ and $\vt\in\R^3$ are the rotation and translation between the two camera frames and $[\vt]_{\times}$ is the skew-symmetric matrix such that $[\vt]_{\times}\vy=\vt\times\vy$. Because $E$ couples relative rotation and the direction of translation in five degrees of freedom, it can be solved from five point correspondences \cite{nister2004fivepoint}; translation, however, is recoverable only up to scale from two views. Decomposing $E$ into $(R,\vt)$ supplies the bootstrap motion at initialization \cite{hartley2004mvg}. In this system the metric scale that the essential matrix lacks is supplied directly by the depth channel, which makes the next stage a metric pose estimator rather than an up-to-scale one.
+
+\subsubsection{Depth-Aided Pose Estimation}
+
+Once depth is available the relative pose is recovered far more robustly as a 3D--2D problem than from the two-view epipolar geometry alone. Matched features in the previous keyframe whose depth falls inside the reliable band $[\ensuremath{0.3\,\mathrm{m}},\ensuremath{3.0\,\mathrm{m}}]$---outside which the structured-light/stereo depth is either saturated or dominated by quantization noise---are back-projected into metric landmarks $\vX_j$ in the world frame. The current camera pose is then the perspective-$n$-point estimate that reprojects those landmarks onto their observed pixels with least squared error,
+\begin{equation}
+\big(R^{\star},\vt^{\star}\big)
+\;=\;
+\argmin_{R\in\SO(3),\,\vt\in\R^{3}}
+\sum_{j\in\mathcal{M}}
+\Big\lVert\, \vu_j \;-\; \pi\!\big(K,\,[\,R \mid \vt\,]\,\tilde{\vX}_j\big)\Big\rVert^{2},
+\label{meth:eq:pnp}
+\end{equation}
+solved in closed form by EPnP \cite{lepetit2009epnp} and wrapped in RANSAC \cite{fischler1981ransac} so that gross mismatches surviving the descriptor and epipolar filters cannot corrupt the estimate. The implementation accepts a hypothesis at a $4$-pixel reprojection threshold with confidence $0.99$ over at most $100$ iterations, then refines on the consensus inliers. Writing the solved world-to-camera pose as $T^{Co_k}_{W}=[\,R^{\star}\mid\vt^{\star}\,]$, the global camera pose is its inverse $T^{W}_{Co_k}=\big(T^{Co_k}_{W}\big)^{-1}$, and the inter-frame motion is the composition
+\begin{equation*}
+\Delta T \;=\; \big(T^{W}_{Co_{k-1}}\big)^{-1}\,T^{W}_{Co_k}
+\;=\; T^{Co_{k-1}}_{W}\,T^{W}_{Co_k}.
+\end{equation*}
+A motion gate rejects any solution whose translational part exceeds \ensuremath{0.5\,\mathrm{m}} or whose rotation angle $\lVert\mathrm{Log}\,\Delta R\rVert$ exceeds \ensuremath{0.2\,\mathrm{rad}} between consecutive frames, since such a jump is physically impossible at \ensuremath{30\,\mathrm{Hz}} and signals a degenerate PnP solution rather than real motion. Poses are carried internally in the camera-optical convention (\,$z$ forward, $x$ right, $y$ down\,), whereas the ROS transform tree expects the body convention (\,$x$ forward, $y$ left, $z$ up\,). The two conventions are related by the fixed orthonormal rotation
+\begin{equation*}
+R^{\mathrm{ros}}_{\mathrm{opt}}
+=\begin{bmatrix} 0 & 0 & 1 \\ -1 & 0 & 0 \\ 0 & -1 & 0 \end{bmatrix},
+\end{equation*}
+applied once when the optical pose is exported. A frame is promoted to a keyframe---triggering the backend---when the number of consistent inlier matches to the last keyframe falls below $150$, indicating that the view has changed enough to add information, or unconditionally after $30$ frames so that the map keeps growing during slow motion.
+
+\subsubsection{Dynamic-Object Segmentation and Static-Feature Filtering}
+
+Equations~\eqref{meth:eq:reproj}--\eqref{meth:eq:pnp} all assume that a landmark $\vX_j$ is a single, time-invariant point in the world. This is the static-world assumption, and it is exactly what a moving object violates. Consider a feature lying on a person who is walking: its world position is $\vX_j(t)$, not a constant, so there is no single $\vX_j$ for which the reprojection residual \eqref{meth:eq:reproj} vanishes across the frames that observe it. Forcing such a feature into \eqref{meth:eq:pnp} makes its residual grow in proportion to the object's displacement projected through the camera Jacobian. Because PnP and bundle adjustment minimize a \emph{sum} of squared residuals, the optimizer cannot tell ``the world moved'' from ``the camera moved.'' It absorbs part of the object's motion into the camera pose, biasing the estimate so that the camera appears to drift with the crowd.
+
+A handful of high-residual dynamic features is therefore not merely noise to be averaged away; it is a systematic bias on the very quantity being estimated. The pipeline therefore removes the dynamic features that cause this bias rather than tolerating the high residuals they produce. A YOLO detector \cite{redmon2016yolo}, consumed from the \texttt{/yolo/tracking} topic, produces bounding boxes for movable categories such as persons. Every ORB observation whose pixel falls inside a dynamic box is culled before matching, so it never enters \eqref{meth:eq:pnp} or the backend cost. What remains is a static feature set for which the rigid model holds, which is the precondition that makes the least-squares estimates of the previous subsections unbiased.
+
+\subsubsection{Sliding-Window Bundle Adjustment}
+
+The frontend pose is a good initialization but it is a chain of pairwise estimates and therefore accumulates drift. The backend removes drift by jointly re-estimating the recent camera poses and the landmarks they observe, minimizing the total robustified reprojection error over a sliding window $\mathcal{W}$ of the ten most recent keyframes,
+\begin{equation}
+\big\{T^{Co_i}_{W}\big\}_{i\in\mathcal{W}},\ \big\{\vX_j\big\}
+\;=\;
+\argmin
+\sum_{i\in\mathcal{W}}\ \sum_{j\in\mathcal{V}_i}
+\rho_\delta\!\Big(\tfrac{1}{\sigma^2}\big\lVert\, \vu_{ij} - \pi\!\big(K,\,T^{Co_i}_{W}\,\tilde{\vX}_j\big)\big\rVert^{2}\Big),
+\label{meth:eq:ba}
+\end{equation}
+where $\mathcal{V}_i$ indexes the landmarks visible in keyframe $i$, the measurement standard deviation is $\sigma=\ensuremath{1\,\mathrm{px}}$, and $\rho_\delta$ is the Huber loss
+\begin{equation*}
+\rho_\delta(s)=
+\begin{cases}
+\tfrac{1}{2}\,s, & \sqrt{s}\le\delta,\\[2pt]
+\delta\big(\sqrt{s}-\tfrac{1}{2}\delta\big), & \sqrt{s}>\delta,
+\end{cases}
+\qquad \delta=1.345,
+\end{equation*}
+which is quadratic for inliers and linear for outliers, so a surviving mismatch contributes a bounded gradient instead of dominating the sum; the value $\delta=1.345$ is the classical choice giving $95\%$ efficiency under Gaussian noise. This is a sparse nonlinear least-squares problem of the bundle-adjustment family \cite{triggs2000bundle}, solved with the Ceres solver \cite{agarwal2012ceres} by Levenberg--Marquardt. Each LM step requires solving the normal equations, whose Hessian has the characteristic arrowhead structure of bundle adjustment: a block for the few camera poses, a large diagonal block for the many landmarks, and sparse coupling between them. The solver exploits this with the Schur complement, marginalizing the landmark block to form a small dense system in the camera poses only (\texttt{SPARSE\_SCHUR}), which reduces the per-iteration cost by orders of magnitude relative to a dense factorization. Rotations are optimized on the quaternion manifold so that each update stays a valid member of $\SO(3)$ without renormalization drift. The gauge freedom---the fact that the cost is invariant to a global rigid transform of all poses and points---is fixed by holding the first pose in the window constant, which removes the seven-degree-of-freedom null space and makes the Hessian well-conditioned. New landmarks are admitted only when their triangulation rays subtend a parallax greater than $5^{\circ}$, below which depth from triangulation is ill-conditioned. The map is pruned of observations seen by fewer than two keyframes or older than \ensuremath{20\,\mathrm{s}}, bounding both the problem size and the influence of stale structure.
+
+\subsubsection{Pose-Graph View, Loop Closure, and Odometry Output}
+
+Bundle adjustment can equivalently be read as inference on a factor graph in which camera poses and landmarks are variables and each observation is a binary factor carrying the residual \eqref{meth:eq:reproj}. Marginalizing the landmarks turns this into a pure pose graph, whose canonical form is
+\begin{equation}
+\big\{T_i\big\}
+\;=\;
+\argmin
+\sum_{(i,j)\in\mathcal{E}}
+\big\lVert\,\mathrm{Log}\!\big(\tilde{T}_{ij}^{-1}\,T_i^{-1}T_j\big)\big\rVert^{2}_{\Omega_{ij}},
+\label{meth:eq:posegraph}
+\end{equation}
+where each edge $(i,j)\in\mathcal{E}$ asserts a measured relative pose $\tilde{T}_{ij}$ between two keyframes with information matrix $\Omega_{ij}$, and $\mathrm{Log}:\SE(3)\!\to\!\R^{6}$ maps the residual pose error into the tangent space so the discrepancy can be measured as a vector. Sequential edges come from the frontend odometry; the edges that would close large drift loops come from place recognition. A DBoW2 bag-of-words vocabulary \cite{galvezlopez2012dbow2} over the ORB descriptors is built and present in the system, providing the appearance database needed to recognize a previously visited place. In the current implementation this recognition infrastructure is in place but the resulting loop-closure constraints are not yet wired into \eqref{meth:eq:posegraph}; the optimizer runs on the sliding window and the sequential graph only. This is an honest limitation rather than an oversight: the architecture is deliberately left expandable so that loop closures can be added as additional edges without changing the estimator, mirroring the full local-plus-global structure of ORB-SLAM and its successors \cite{murartal_2015_orbslam,campos_2021_orbslam3}.
+
+The optimized pose is what the rest of the autonomy stack consumes. After each backend solve, the latest window pose $T^{W}_{Co}$ is converted from the optical to the ROS convention and published as the \texttt{odom}$\to$\texttt{camera\_link} transform; the fixed eye-in-hand extrinsic $T^{B}_{Co}$, calibrated once, then carries the estimate to the base through $T^{W}_{B}=T^{W}_{Co}\,\big(T^{B}_{Co}\big)^{-1}$, realizing the \texttt{camera\_link}$\to$\texttt{base\_link} edge of the transform tree. Following the standard ROS~2 split, the smooth high-rate frontend estimate supplies the continuously varying \texttt{odom}$\to$\texttt{base\_link} transform while the corrections introduced by bundle adjustment are absorbed into the \texttt{map}$\to$\texttt{odom} edge, so that downstream consumers see a trajectory that never jumps backward in the odometry frame even when the global estimate is refined. Both the transform tree and an odometry message are published on \texttt{/tf} and \texttt{/odom} at the camera rate of \ensuremath{30\,\mathrm{Hz}}, together with the running trajectory. This pose is precisely the ``where am I'' that the navigation stack requires. The global planner needs the robot's position in the map to compute a path to the charging pose, and the local costmap needs it to register obstacle observations against the robot's footprint, so a single self-consistent pose estimate must serve both.
+
+The subsystem therefore outputs the global pose $T^{W}_{Co}$, propagated to the base as $T^{W}_{B}$ and published as the \texttt{map}$\to$\texttt{odom}$\to$\texttt{base\_link} transform and the \texttt{/odom} stream. The volumetric mapping subsystem (nvblox) fuses the registered depth into a model anchored in this \texttt{odom} frame, and the navigation subsystem (Nav2) plans and tracks against this pose and the costmap it induces---the two consumers to which the remainder of the methodology now turns.
+
+
+\subsection{Volumetric Mapping and Costmap Generation}\label{meth:sec:nvblox}
+
+The depth-estimation stage delivers, at camera rate, a dense metric depth image $\mathcal{D}\colon\Omega\to\R_{>0}$ that assigns to every pixel $\vu\in\Omega$ the range to the first opaque surface along its line of sight, while the visual--inertial localization stage delivers the body pose $\mathbf{T}^{\mathcal W}_{\mathcal B}\in\SE(3)$ that places the robot in the persistent world frame $\mathcal W$. Neither product is, by itself, a model of the surroundings: a single depth frame is a momentary, viewpoint-locked, noise-corrupted slice of geometry, and the pose is only the observer's location within it. This subsystem closes that gap by fusing the registered depth frames into a single volumetric reconstruction that accumulates evidence over time. From that reconstruction it distills the field the navigator consults: a planar field of distance-to-obstacle whose value bounds how far the base may move and whose gradient points toward clearance. The governing operations are stated equation-first and then explained physically: the truncated signed-distance measurement of a voxel, its weighted-average fusion across frames, the Euclidean distance transform extracted for planning, and the costmap that the local controller of Section~\ref{meth:sec:nav} reads as ``what is around me.''
+
+\subsubsection{Voxel grid and the projective signed-distance measurement}
+
+The reconstruction discretizes $\mathcal W$ into a regular grid of cubic voxels of edge length $\ell$, and to each voxel center $\vx\in\R^3$ it attaches two scalars: a signed distance estimate $D(\vx)$ and an accumulated confidence weight $W(\vx)$. Before a voxel can be updated by a depth frame it must be expressed in the camera optical frame $\mathcal C$ in which that frame was measured. The required transform is obtained by chaining the body pose with the fixed, calibrated eye-in-hand extrinsic $\mathbf{T}^{\mathcal B}_{\mathcal C}$,
+\begin{equation}
+  \mathbf{T}^{\mathcal W}_{\mathcal C}=\mathbf{T}^{\mathcal W}_{\mathcal B}\,\mathbf{T}^{\mathcal B}_{\mathcal C},
+  \qquad
+  \vx^{\mathcal C}=\big(\mathbf{T}^{\mathcal W}_{\mathcal C}\big)^{-1}\vx ,
+  \label{meth:eq:nvblox-register}
+\end{equation}
+so that every voxel center carries a camera-frame coordinate $\vx^{\mathcal C}=(x^{\mathcal C},y^{\mathcal C},z^{\mathcal C})^{\T}$ whose third component $z^{\mathcal C}$ is its depth along the optical axis. Projecting this point through the pinhole model $\pi(\cdot)$ yields the pixel $\vu=\pi(\vx^{\mathcal C})$ whose ray passes through the voxel, and the measured depth stored at that pixel is $\mathcal{D}(\vu)$. The \emph{projective truncated signed distance} of the voxel for this frame compares the two ranges and clamps the difference to a band of half-width $\delta$,
+\begin{equation}
+  d(\vx)=\operatorname{trunc}_\delta\!\Big(\mathcal{D}\big(\pi(\vx^{\mathcal C})\big)-z^{\mathcal C}\Big),
+  \qquad
+  \operatorname{trunc}_\delta(s)=\max\!\big(-\delta,\,\min(\delta,\,s)\big).
+  \label{meth:eq:tsdf}
+\end{equation}
+The sign carries the geometry. When the voxel lies in front of the measured surface, $z^{\mathcal C}<\mathcal{D}(\vu)$ and $d(\vx)>0$: the camera saw past the voxel, so the voxel is observed free space. When the voxel lies behind the surface, $z^{\mathcal C}>\mathcal{D}(\vu)$ and $d(\vx)<0$: the voxel is occluded, and the negative value records the estimated depth of penetration into solid matter. The surface itself is the locus where the measured and predicted ranges agree, the zero crossing $d(\vx)=0$. Truncation to $\pm\delta$ is not a numerical convenience but a statement about what a depth sensor can know. The sensor has no information about geometry far behind a measured surface, and a single grazing or distant reading must not assert occupancy through an entire column of voxels. The influence of each frame is therefore confined to a thin shell of thickness $2\delta$ straddling the observed surface. Voxels whose camera-frame depth falls outside this shell, or whose projection lands outside the image domain $\Omega$, receive no update from the frame and retain their prior estimate. This projective construction --- sampling the depth image once per voxel rather than casting an explicit ray per pixel --- makes the integration of a full frame an $O(N_{\text{band}})$ operation over only the voxels near the surface. It is the basis of the original range-image fusion of Curless and Levoy~\cite{curless1996tsdf}.
+
+\subsubsection{Truncated signed-distance field and weighted-average fusion}
+
+A single frame's measurement $d(\vx)$ is too noisy to be trusted: stereo or structured-light depth carries error that grows with range and with the obliquity of the surface, and a lone spurious reading would otherwise corrupt the map. The Truncated Signed Distance Field (TSDF) is therefore not the latest measurement but a running, confidence-weighted average of all measurements a voxel has ever received. Each new frame fuses into the stored estimate by the recursion
+\begin{equation}
+  D(\vx)\;\leftarrow\;\frac{W(\vx)\,D(\vx)+w(\vx)\,d(\vx)}{W(\vx)+w(\vx)},
+  \qquad
+  W(\vx)\;\leftarrow\;\min\!\big(W(\vx)+w(\vx),\,W_{\max}\big),
+  \label{meth:eq:tsdf-update}
+\end{equation}
+where $d(\vx)$ is the single-frame distance of Equation~\eqref{meth:eq:tsdf} and $w(\vx)$ is the measurement weight encoding how much that frame should be believed. The weight is range- and angle-dependent, reflecting the physics of the sensor: a representative choice
+\begin{equation}
+  w(\vx)=\frac{\cos\theta_i}{\big(z^{\mathcal C}\big)^2}\,\mathbf{1}\!\left[\,d(\vx)>-\delta\,\right]
+  \label{meth:eq:tsdf-weight}
+\end{equation}
+falls off with the square of the range, because triangulation error scales with depth, and with the incidence angle $\theta_i$ between the optical ray and the local surface normal, because grazing views are unreliable; the indicator suppresses contributions from voxels deep behind the truncation band, where the projective model breaks down. Equation~\eqref{meth:eq:tsdf-update} is precisely the incremental form of a maximum-likelihood estimate under independent Gaussian range noise: it is the recursive mean, with $W(\vx)$ playing the role of accumulated inverse variance. A surface element observed repeatedly from slightly different viewpoints sees its weight grow and its distance estimate converge to the true zero crossing, with the per-frame noise averaging toward zero as $1/\sqrt{W}$. A single spurious reading, arriving once with a small weight against a large accumulated $W$, perturbs $D(\vx)$ negligibly and is forgotten. This is the projective-fusion principle introduced for real-time dense reconstruction by KinectFusion~\cite{newcombe2011kinectfusion}: many noisy single-frame distances integrate into one stable surface estimate. The cap $W_{\max}$ deliberately bounds the accumulated weight so that the map never becomes so confident that it cannot adapt. Once $W$ saturates, Equation~\eqref{meth:eq:tsdf-update} degenerates to an exponential moving average with time constant $W_{\max}/w$, giving recent frames standing authority to revise the geometry and so allowing the reconstruction to track a scene that changes. The visible surface is recovered at any instant as the zero level set $\{\vx:D(\vx)=0\}$, triangulated into a colored mesh by marching cubes for visualization and inspection.
+
+\subsubsection{Euclidean signed-distance field and occupancy}
+
+The TSDF stores distance only within the truncation band $\pm\delta$; a voxel a metre from the nearest wall holds no useful range, because every frame that saw it clamped its contribution to $+\delta$. A planner, however, needs exactly that long-range information: how far the robot may travel before contact, in any direction, not merely within a few centimetres of a surface. The map is therefore converted into a Euclidean Signed Distance Field (ESDF) $\Phi(\vx)$, in which every voxel stores the true Euclidean distance to the nearest surface,
+\begin{equation}
+  \Phi(\vx)=s(\vx)\,\min_{\vy\in\mathcal{Z}}\big\lVert \vx-\vy\big\rVert_2,
+  \qquad
+  \mathcal{Z}=\{\vy:D(\vy)=0\},
+  \label{meth:eq:esdf}
+\end{equation}
+where $\mathcal{Z}$ is the zero-level (surface) set extracted from the TSDF and $s(\vx)=+1$ for free voxels, $s(\vx)=-1$ for voxels interior to an obstacle. Evaluating Equation~\eqref{meth:eq:esdf} by brute-force search over all surface voxels for every grid point would be quadratic in complexity and computationally infeasible at map scale. The field is therefore grown incrementally by a wavefront, or brushfire, propagation. The occupied voxels are seeded at $\Phi=0$ and placed on a frontier. Each voxel then takes its distance from the smallest neighbor distance plus the inter-voxel step, and the frontier advances outward, so that distances spread from every surface simultaneously like a flood filling the free space. Crucially, only the voxels whose nearest surface actually changed between frames are re-propagated. This makes the update incremental and bounds its cost to the size of the geometric change rather than the size of the map --- the property that makes voxel-hashed ESDF mapping viable online. The approach was established by Voxblox~\cite{oleynikova2017voxblox} and carried onto the GPU, at the depth-frame rate the platform requires, by nvblox~\cite{millane2024nvblox}, whose data-parallel TSDF integration and distance propagation supply the implementation used here. Occupancy is read directly from the sign and magnitude of the fields: a voxel is occupied where $\Phi(\vx)\le 0$, free where $\Phi(\vx)$ exceeds a small positive observation threshold, and unknown where no frame has yet accumulated weight.
+
+\subsubsection{Two-dimensional slice and costmap cost}
+
+The base navigates on the floor, so the navigator does not consume the full three-dimensional field but a horizontal slice of it. The ESDF is sampled in a thin band above the ground plane --- spanning the height interval over which the robot's body and the obstacles that threaten it reside, here roughly \ensuremath{0.10\text{--}0.60\,\mathrm{m}} --- and collapsed by taking, at each planar cell, the minimum clearance over the band. The result is a planar distance field $\Phi(\vx)$, $\vx\in\R^2$, that already encodes everything the planner needs. From it the costmap assigns to each cell a traversal cost that is a monotone non-increasing function of clearance,
+\begin{equation}
+  c(\vx)=
+  \begin{cases}
+    c_{\mathrm{lethal}}, & \Phi(\vx)\le r_{\mathrm{rob}},\\[2pt]
+    c_{\mathrm{lethal}}\,\exp\!\big(-k\,[\Phi(\vx)-r_{\mathrm{rob}}]\big), & r_{\mathrm{rob}}<\Phi(\vx)\le r_{\mathrm{rob}}+d_{\mathrm{infl}},\\[2pt]
+    0, & \Phi(\vx)>r_{\mathrm{rob}}+d_{\mathrm{infl}},
+  \end{cases}
+  \label{meth:eq:cost}
+\end{equation}
+where $r_{\mathrm{rob}}$ is the robot's inscribed radius, $d_{\mathrm{infl}}$ the inflation horizon, and $k>0$ the decay rate. The three regimes mirror the three things a planner must distinguish. Where the clearance is no larger than the robot radius the cell is \emph{lethal}: the robot center cannot be placed there without collision, and the cost is the maximum that forbids the cell outright. Just outside that boundary the cost decays exponentially, an \emph{inflation} margin that does not forbid passage but penalizes it, biasing planned paths toward the center of free corridors and away from grazing contact. Beyond the inflation horizon the cost is zero and the cell is freely traversable. Inflating the obstacles by $r_{\mathrm{rob}}$ is what lets the planners of Section~\ref{meth:sec:nav} treat the base as a dimensionless point moving through a scalar cost field rather than a rigid body that must be collision-checked at every candidate pose.
+
+The decision to hand the planner this distilled field, rather than the raw registered point cloud from which it was built, is deliberate and rests on three properties of Equations~\eqref{meth:eq:esdf} and \eqref{meth:eq:cost}. First, queries are constant-time and analytically differentiable: the clearance at any point is a single grid lookup, $\Phi(\vx)$, and the direction of increasing clearance is its gradient $\nabla\Phi(\vx)$, available in closed form by finite differencing the field. A controller that must, every cycle, check thousands of candidate trajectories for collision and bias them toward open space gets both the collision test and the descent direction for free, whereas a point cloud would force a nearest-neighbor search per query. Second, the field is temporally fused: by Equation~\eqref{meth:eq:tsdf-update} every cell reflects all frames that ever observed it, so the per-frame depth noise that would make a single point cloud flicker has been averaged out, and a moving obstacle both appears and, once it leaves, clears from the slice as the weighted average decays. Third, the memory footprint is bounded: a fixed-resolution voxel grid sliced to a thin planar band occupies storage that scales with mapped area, not with the unbounded and ever-growing number of points a raw cloud would accumulate. These are the reasons the navigation stack is built on the distance field.
+
+\begin{figure}[!htb]
+  \centering
+  \begin{tikzpicture}[node distance=9mm and 12mm, every node/.style={font=\footnotesize}]
+    \node[data] (depth) {registered\\depth $\mathcal{D},\ \mathbf{T}^{\mathcal W}_{\mathcal B}$};
+    \node[box, right=of depth] (tsdf) {TSDF\\integration\\\eqref{meth:eq:tsdf-update}};
+    \node[box, right=of tsdf] (esdf) {ESDF\\propagation\\\eqref{meth:eq:esdf}};
+    \node[box, above right=6mm and 12mm of esdf] (mesh) {surface\\mesh};
+    \node[box, below right=6mm and 12mm of esdf] (slice) {2-D ESDF\\slice $\Phi(\vx)$};
+    \node[data, right=14mm of slice] (cost) {Nav2 costmap\\$c(\vx)$ \eqref{meth:eq:cost}};
+    \draw[arr] (depth) -- (tsdf);
+    \draw[arr] (tsdf) -- (esdf);
+    \draw[arr] (esdf) -- (mesh);
+    \draw[arr] (esdf) -- (slice);
+    \draw[arr] (slice) -- (cost);
+  \end{tikzpicture}
+  \caption{Volumetric mapping pipeline. Registered metric depth and the body pose are fused into a TSDF by the weighted average of Equation~\eqref{meth:eq:tsdf-update}; the truncated field is converted into a Euclidean distance field by wavefront propagation, from which a colored surface mesh and a two-dimensional navigation slice are extracted; the slice is inflated into the Nav2 costmap of Equation~\eqref{meth:eq:cost}.}
+  \label{meth:fig:nvbloxpipe}
+\end{figure}
+
+Figure~\ref{meth:fig:nvbloxpipe} summarizes the dataflow. The registered depth and pose enter on the left; TSDF integration accumulates them into the truncated field; ESDF propagation grows the full Euclidean distance field; and the field is exported along two paths --- a surface mesh for inspection and a two-dimensional slice for navigation --- the latter inflated into the costmap. The two products that leave this subsystem and enter the navigation stack of Section~\ref{meth:sec:nav} are therefore the planar Euclidean distance field $\Phi(\vx)$ and the costmap $c(\vx)$ derived from it through Equation~\eqref{meth:eq:cost}. Together they constitute a constant-time, differentiable, temporally fused, bounded-memory description of free and forbidden space. Both are registered in the same world frame $\mathcal W$ as the pose estimate and are consumed directly by the global planner and local controller that compute and track the base's collision-free motion toward the charging dock.
+
+
+\subsection{Autonomous Navigation}\label{meth:sec:nav}
+
+The navigation subsystem inherits two products from the preceding chapters and converts
+them into wheel motion. From the localization stage it receives the rigid-body pose of the
+mobile base in the world frame, $\mathbf{T}^{W}_{B}\in\SE(3)$, whose planar projection
+$\vx_B=(x,\,y,\,\theta)\T\in\SE(2)$ answers the question \emph{where am I}; from the mapping
+stage it receives the Euclidean Signed Distance Field (ESDF) reconstructed by \texttt{nvblox}
+together with the derived occupancy costmap, which answers \emph{what is around me}. These are
+precisely the two quantities any mobile planner requires: a metric estimate of the robot's
+configuration and a spatial encoding of free and occupied space. Everything that follows is a
+deterministic function of this pair. The output of the subsystem is a single body twist command
+$\vu_0=(v,\,\omega)\T$ published on \texttt{/cmd\_vel}, which is handed downstream to the
+dynamics and motion-control layer of Section~\ref{meth:sec:dyn}. We organize the computation through the
+ROS\,2 Navigation~2 (Nav2) stack \cite{macenski_2020_nav2}, deriving in turn the global planner
+($A^{\star}$, \cite{hart1968astar}) and the local controller (Model Predictive Path Integral
+control, \cite{williams2017mppi}).
+
+\subsubsection{Navigation Architecture}\label{meth:sec:nav-arch}
+
+Nav2 decomposes autonomous navigation into a set of independently lifecycle-managed servers
+coordinated by a Behavior Tree, and we adopt this decomposition without modification because
+each server maps cleanly onto one functional responsibility of the system. The
+\texttt{bt\_navigator} acts as the task orchestrator: rather than hard-coding a fixed
+sense--plan--act loop, it ticks a Behavior Tree whose leaf nodes invoke the planning, control,
+and recovery actions, while its control-flow nodes (sequences, fallbacks, and decorators)
+encode the contingency logic that decides \emph{when} to replan, \emph{when} to fall back to a
+recovery, and \emph{when} to abort. Behavior Trees are preferred here over finite state machines
+because they are modular and reactive, so a recovery branch can be inserted or reordered without
+rewiring the remaining transitions \cite{colledanchise2018bt}. The tree ticks at a fixed rate and
+re-evaluates conditions every tick, giving the reactivity that a long-horizon docking task
+demands.
+
+Underneath the tree, the \emph{Planner Server} computes a global, collision-free geometric path
+from the current pose to the goal over the global costmap; we configure it with an $A^{\star}$
+search (Section~\ref{meth:sec:nav-global}). The \emph{Controller Server} is responsible for local trajectory
+tracking: given the global path and the local costmap, it produces the instantaneous velocity
+command that keeps the platform on the path while respecting the differential-drive kinematics
+and avoiding obstacles that the global plan could not anticipate; we configure it with an MPPI
+controller (Section~\ref{meth:sec:nav-local}). Both servers consume layered costmaps. The global and local
+\emph{Costmap} instances are built from stacked plugins: the \texttt{nvblox} ESDF layer projects
+the signed-distance reconstruction of Section~\ref{meth:sec:nav-arch} into a 2D cost surface, and an
+inflation layer convolves the lethal obstacles with a decaying kernel so that the planners are
+penalized for grazing obstacles rather than only for striking them. The \emph{Behavior Server}
+hosts recovery primitives---spin, back-up, and wait---that the Behavior Tree invokes when the
+controller reports that it is stuck. Finally, the \emph{Lifecycle Manager} provides deterministic
+bring-up and shutdown: it transitions the managed nodes through the \texttt{unconfigured}%
+--\texttt{inactive}--\texttt{active} states in a fixed order, guaranteeing that no planner is
+ticked before its costmap is populated and that a fault in any single node can be isolated by
+deactivating it. 
+
+\subsubsection{Global Planning: \texorpdfstring{$A^{\star}$}{A*} on the Costmap}\label{meth:sec:nav-global}
+
+The Planner Server searches for a minimum-cost path on the graph induced by the global costmap.
+Each free cell is a vertex $n$, and an $8$-connected neighborhood defines the edges, so that a
+robot may move to any of the four cardinal and four diagonal neighbors. $A^{\star}$ orders this
+search by the evaluation function
+
+\begin{equation}\label{meth:eq:astar}
+  f(n) = g(n) + h(n),
+\end{equation}
+
+where $g(n)$ is the exact accumulated cost of the best path discovered so far from the start to
+$n$, and $h(n)$ is a heuristic estimate of the remaining cost from $n$ to the goal
+\cite{hart1968astar}. The node with the smallest $f$ is expanded first, which is what makes
+$A^{\star}$ a best-first search guided by both the cost already paid and the cost expected. The
+edge cost between adjacent cells $n$ and $n'$ combines the geometric traversal length with the
+costmap penalty,
+
+\begin{equation}\label{meth:eq:cost-cell}
+  c(n,n') = \underbrace{\lVert \mathbf{p}_{n'}-\mathbf{p}_{n}\rVert}_{\text{traversal}}
+            \;+\; \underbrace{w_{\mathrm{c}}\,\kappa(n')}_{\text{inflation cost}},
+\end{equation}
+
+in which $\lVert\mathbf{p}_{n'}-\mathbf{p}_{n}\rVert$ equals the cell size for a cardinal step
+and $\sqrt{2}$ times the cell size for a diagonal step, $\kappa(n')\in[0,1]$ is the normalized
+inflation cost read from the costmap at the destination cell, and $w_{\mathrm{c}}>0$ trades off
+path length against clearance. Because $\kappa$ grows as the planner approaches an obstacle, the
+optimizer is steered toward routes that keep a margin from walls and the charging fixture.
+
+The value of $A^{\star}$ lies in its optimality guarantee. If the heuristic never overestimates
+the true optimal cost-to-go $h^{\star}(n)$, that is if $h(n)\le h^{\star}(n)$ for every $n$ (the
+\emph{admissibility} condition), then the first goal expansion returns a least-cost path. A
+slightly stronger property, \emph{consistency} (the triangle inequality on the graph),
+
+\begin{equation}\label{meth:eq:consistency}
+  h(n) \;\le\; c(n,n') + h(n'),
+\end{equation}
+
+guarantees in addition that $f$ is monotonically non-decreasing along any expanded path, so that
+once a node is removed from the open list its $g$-value is already optimal and need never be
+revised. A consistent heuristic is therefore both admissible and computationally efficient, since
+it forbids costly re-openings. For the $8$-connected grid we use the \emph{octile} distance,
+which is the exact length of the shortest obstacle-free path on an infinite grid that permits
+diagonal moves:
+
+\begin{equation}\label{meth:eq:octile}
+  h(n) = (\Delta x + \Delta y) + (\sqrt{2}-2)\,\min(\Delta x,\,\Delta y),
+\end{equation}
+
+where $\Delta x = \lvert x_n - x_{\mathrm{goal}}\rvert$ and
+$\Delta y = \lvert y_n - y_{\mathrm{goal}}\rvert$ are the absolute coordinate differences in cell
+units. The construction is intuitive: along the shorter axis the path takes
+$\min(\Delta x,\Delta y)$ diagonal steps, each of length $\sqrt{2}$, and the remaining
+$\lvert\Delta x-\Delta y\rvert$ steps are cardinal. Collecting terms gives
+$\sqrt{2}\,\min(\Delta x,\Delta y) + \bigl[(\Delta x+\Delta y)-2\min(\Delta x,\Delta y)\bigr]$,
+which rearranges exactly to Equation~\eqref{meth:eq:octile}. Since this is the true free-space distance on the
+grid, it is admissible and consistent, and it dominates the Manhattan and Euclidean heuristics,
+expanding strictly fewer nodes.
+
+The search is implemented with a binary-heap open list keyed on $f$. Each expansion pops the
+minimum in $O(\log V)$ time and relaxes a constant number of edges, so the overall complexity is
+$O(E\log V)$ for $V$ vertices and $E$ edges; on the $8$-connected grid $E=\Theta(V)$. In the
+pathological case of an uninformative heuristic the frontier can grow as $O(b^{d})$ in the
+branching factor $b$ and solution depth $d$, but the dominance of the octile heuristic keeps the
+realized expansion count far below this implicit worst case. The Planner Server emits the
+resulting polyline as the global path, which the Behavior Tree forwards to the Controller Server.
+
+\subsubsection{Local Control: Model Predictive Path Integral}\label{meth:sec:nav-local}
+
+The global path is geometric and obstacle-agnostic to dynamics; converting it into an executable
+velocity command that respects the differential-drive kinematics and reacts to the live local
+costmap is the task of the Controller Server. We use Model Predictive Path Integral (MPPI)
+control, a sampling-based, derivative-free realization of stochastic optimal control that
+evaluates many randomly perturbed control sequences in parallel and forms their cost-weighted
+average \cite{williams2017mppi}. Let the nominal control sequence over a horizon of $T$ steps be
+$U=(\vu_0,\dots,\vu_{T-1})$ with $\vu_t=(v_t,\omega_t)\T$ the commanded body twist. At every
+control cycle MPPI draws $K$ noisy rollouts by perturbing each control with Gaussian noise,
+
+\begin{equation}\label{meth:eq:mppi-sample}
+  \vu_t^{k} = \vu_t + \bm{\epsilon}_t^{k},
+  \qquad \bm{\epsilon}_t^{k}\sim\mathcal{N}(\mathbf{0},\,\Sigma),
+  \qquad k=1,\dots,K,
+\end{equation}
+
+where $\Sigma$ is the exploration covariance over $(v,\omega)$. Each sampled control sequence is
+propagated through the differential-drive (unicycle) model derived in Section~\ref{meth:sec:dyn}, discretized
+at the control period $\Delta t$:
+
+\begin{equation}\label{meth:eq:nav-unicycle}
+  \vx_{t+1} =
+  \begin{bmatrix} x_{t+1}\\ y_{t+1}\\ \theta_{t+1}\end{bmatrix} =
+  \begin{bmatrix}
+    x_t + v_t^{k}\cos\theta_t\,\Delta t\\
+    y_t + v_t^{k}\sin\theta_t\,\Delta t\\
+    \theta_t + \omega_t^{k}\,\Delta t
+  \end{bmatrix},
+\end{equation}
+
+with $\vx_0$ initialized at the current base pose $\vx_B$ inherited from localization. The
+nonholonomic constraint---no instantaneous lateral velocity---is built into
+Equation~\eqref{meth:eq:nav-unicycle}, so every sampled trajectory is kinematically feasible by construction.
+Each resulting state trajectory $\tau_k=(\vx_0,\dots,\vx_T)$ is scored by the cost functional
+
+\begin{equation}\label{meth:eq:mppi-cost}
+  S(\tau_k) = \phi(\vx_T)
+  + \sum_{t=0}^{T-1}\Bigl[\,
+      q_{\mathrm{path}}\,c_{\mathrm{path}}(\vx_t)
+      + q_{\mathrm{obs}}\,c_{\mathrm{obs}}(\vx_t)\,\Bigr]
+  + \gamma\sum_{t=0}^{T-1}\vu_t\T\,\Sigma^{-1}\bm{\epsilon}_t^{k},
+\end{equation}
+
+whose three groups encode the three competing objectives of local control. The
+path-following term $c_{\mathrm{path}}(\vx_t)$ penalizes the cross-track and heading deviation of
+$\vx_t$ from the global path, pulling the rollout toward the reference. The obstacle term reads
+the ESDF clearance $\Phi(\vx_t)$ supplied by the local costmap and penalizes proximity, for
+example
+$c_{\mathrm{obs}}(\vx_t)=\bigl(\max\{0,\,d_{\mathrm{safe}}-\Phi(\vx_t)\}\bigr)^{2}$,
+so that trajectories straying inside the safety margin $d_{\mathrm{safe}}$ are sharply
+discouraged while those in open space are unaffected; the signed-distance representation makes
+this gradient information available directly, which is the principal reason the ESDF handoff of
+Section~\ref{meth:sec:nav-arch} is so well matched to MPPI. The final term is the information-theoretic
+control penalty that regularizes the deviation from the nominal control under the exploration
+metric $\Sigma^{-1}$, with temperature-like weight $\gamma$; $\phi(\vx_T)$ is the terminal cost
+on the horizon endpoint.
+
+MPPI converts these costs into an update through the free-energy (path-integral) weighting. Each
+rollout receives an importance weight
+
+\begin{equation}\label{meth:eq:mppi-weight}
+  w_k = \frac{1}{\eta}\exp\!\Bigl(-\tfrac{1}{\lambda}\bigl(S_k-\rho\bigr)\Bigr),
+  \qquad
+  \rho=\min_{j}S_j,
+  \qquad
+  \eta=\sum_{j=1}^{K}\exp\!\Bigl(-\tfrac{1}{\lambda}\bigl(S_j-\rho\bigr)\Bigr),
+\end{equation}
+
+where $S_k\equiv S(\tau_k)$, the temperature $\lambda>0$ sets the softness of the selection, the
+baseline $\rho$ is subtracted purely for numerical stability so that the smallest exponent is
+zero, and $\eta$ normalizes the weights to sum to one. As $\lambda\!\to\!0$ the weighting collapses
+onto the single best rollout, while larger $\lambda$ averages more democratically across
+low-cost samples. The optimal-control update is the cost-weighted mean of the sampled
+perturbations applied to the nominal sequence,
+
+\begin{equation}\label{meth:eq:mppi-update}
+  \vu_t \;\leftarrow\; \vu_t + \sum_{k=1}^{K} w_k\,\bm{\epsilon}_t^{k},
+  \qquad t=0,\dots,T-1,
+\end{equation}
+
+which is the gradient-free realization of the path-integral optimal control law: it nudges the
+control toward the regions of control space that the low-cost rollouts populated, without ever
+linearizing the dynamics or the cost. Together, Equations~\eqref{meth:eq:mppi-sample}--\eqref{meth:eq:mppi-update} define the MPPI procedure. The
+controller runs in a receding-horizon fashion: after Equation~\eqref{meth:eq:mppi-update} the first command
+$\vu_0$ is dispatched, the remaining sequence is shifted forward by one step to warm-start the
+next cycle, and the entire optimization is repeated at the control rate. Because the rollouts in
+Equation~\eqref{meth:eq:mppi-sample}--Equation~\eqref{meth:eq:mppi-cost} are mutually independent, they are evaluated in
+parallel on the GPU, which is what makes a horizon of dozens of steps and thousands of samples
+tractable within a single control period.
+
+
+
+\subsubsection{Command Generation and Hardware Dispatch}\label{meth:sec:nav-dispatch}
+
+The quantity actually executed by the robot is the first control of the optimized sequence. After
+Equation~\eqref{meth:eq:mppi-update}, the Controller Server publishes
+\begin{equation}\label{meth:eq:cmd-vel}
+  \texttt{/cmd\_vel} \;=\; \vu_0 \;=\; (v,\,\omega)\T,
+\end{equation}
+a single body twist expressing the desired forward speed $v$ and yaw rate $\omega$ of the base.
+This message must travel from the on-board laptop, where the GPU-parallel MPPI optimization runs,
+to the low-level controller on the platform. The laptop publishes \texttt{/cmd\_vel} on the ROS\,2
+graph; the underlying DDS middleware serializes the twist and transports it over the
+\ensuremath{5\,\mathrm{GHz}} WiFi link to the Raspberry~Pi carried by the mobile base. On the Pi, a bridge
+node subscribed to \texttt{/cmd\_vel} receives the twist and converts it into the per-wheel
+velocity setpoints required by the differential drive. This conversion is the inverse kinematics
+of the unicycle model derived in full in Section~\ref{meth:sec:dyn}: for a drive of wheel radius $r$ and track
+width $L_t$,
+\begin{equation}\label{meth:eq:wheel-ik}
+  \omega_{\mathrm{R}} = \frac{v + \tfrac{L_t}{2}\,\omega}{r},
+  \qquad
+  \omega_{\mathrm{L}} = \frac{v - \tfrac{L_t}{2}\,\omega}{r},
+\end{equation}
+mapping the body twist $(v,\omega)$ to right- and left-wheel angular rates. The bridge then writes
+these setpoints over a Serial link to the PRIZM motor controller, which closes the low-level
+velocity loop on the drive motors. The split is deliberate: the perception- and optimization-heavy
+navigation stack remains on the laptop, while only the compact twist crosses the wireless link and
+the deterministic, latency-sensitive wheel control stays local to the Pi and PRIZM.
+
+The receding-horizon loop closes here. At the next cycle the freshly updated base pose
+$\mathbf{T}^{W}_{B}$ from localization and the freshly integrated ESDF from mapping re-enter
+Section~\ref{meth:sec:nav-arch}, and the planner and controller recompute Equation~\eqref{meth:eq:astar}--Equation~\eqref{meth:eq:mppi-update}.
+The single artifact this subsystem passes downstream is therefore the body twist command
+$\texttt{/cmd\_vel}=(v,\omega)\T$ of Equation~\eqref{meth:eq:cmd-vel}, which the dynamics and motion-control
+layer of Section~\ref{meth:sec:dyn} realizes as physical wheel motion.
+
+
+\subsection{Robot Dynamic Modeling and Motion Control}\label{meth:sec:dyn}
+
+The motion-planning layer of Section~\ref{meth:sec:nav} resolves the navigation task into a single instantaneous command published on the \texttt{/cmd\_vel} topic, namely the body twist $\eta=\begin{bmatrix}v & \omega\end{bmatrix}^{\T}$ comprising the forward linear velocity $v$ and the yaw rate $\omega$ of the platform expressed in the base frame $\mathcal{F}_b$. This twist is a kinematic intention: it states how the mobile base should move, but says nothing about the electrical and mechanical effort required to realise that motion on a real differential-drive chassis. The present section closes that gap. Starting from the body twist supplied by the planner, it constructs the wheel-level kinematic map, the constrained Euler--Lagrange dynamics of the nonholonomic base, the actuator model of the geared permanent-magnet DC drives, and finally the nested feedback architecture that converts $(v,\omega)$ into the two wheel torques $\tau_R$ and $\tau_L$ that actually drive the robot to the charging station. The wheel radius $r$ and the wheel track $L_t$ are retained as symbolic parameters throughout, to be replaced by the measured values of the constructed platform.
+
+\subsubsection{From Commanded Body Twist to Wheel Setpoints}\label{meth:subsec:ik}
+
+The forward (unicycle) kinematics of the base were established in Section~\ref{meth:sec:perception}; recalling Equation~\eqref{meth:eq:fk} and Equation~\eqref{meth:eq:unicycle}, the pose rate $\dot{\vq}=\begin{bmatrix}\dot x & \dot y & \dot\theta\end{bmatrix}^{\T}$ of the axle midpoint obeys $\dot x = v\cos\theta$, $\dot y = v\sin\theta$, $\dot\theta=\omega$, which expresses the planar pose evolution in terms of the very twist that the planner emits. For control we require the inverse map, which distributes a commanded twist over the two wheels. Writing the standard differential-drive relations $v=\tfrac{r}{2}(\omega_R+\omega_L)$ and $\omega=\tfrac{r}{L_t}(\omega_R-\omega_L)$ and solving the resulting $2\times 2$ linear system for the wheel angular velocities gives the inverse kinematics
+\begin{equation}\label{meth:eq:ik}
+\omega_R = \frac{2v + L_t\,\omega}{2r},
+\qquad
+\omega_L = \frac{2v - L_t\,\omega}{2r}.
+\end{equation}
+Equation~\eqref{meth:eq:ik} is the entry point of the entire control chain: it converts the single planner command $(v,\omega)$ into the pair of wheel-speed setpoints $(\omega_R^{\star},\omega_L^{\star})$ that the low-level regulators are obliged to track. The sum term $2v$ produces common-mode rotation (pure translation), whereas the differential term $L_t\,\omega$ produces opposite-sense rotation (pure turning); the factor $L_t$ shows that a wider track demands proportionally larger wheel-speed differences for a given yaw rate, which is the kinematic origin of the turning-effort penalty on broad chassis~\cite{siegwart2011mobile}.
+
+The dual relation, mapping wheel velocities back to the pose rate, is the wheel Jacobian. Substituting the differential-drive relations into the unicycle kinematics and collecting the coefficients of $\omega_R$ and $\omega_L$ yields
+\begin{equation}\label{meth:eq:jac}
+\dot{\vq}
+= J(\theta)\begin{bmatrix}\omega_R\\[2pt]\omega_L\end{bmatrix},
+\qquad
+J(\theta)=
+\begin{bmatrix}
+\dfrac{r}{2}\cos\theta & \dfrac{r}{2}\cos\theta\\[6pt]
+\dfrac{r}{2}\sin\theta & \dfrac{r}{2}\sin\theta\\[6pt]
+\dfrac{r}{L_t} & -\dfrac{r}{L_t}
+\end{bmatrix}.
+\end{equation}
+The first two rows of $J(\theta)$ are identical, encoding the physical fact that a planar wheel can drive its contact point only along the heading direction; the third row, antisymmetric in the two columns, encodes that only a velocity difference produces rotation. Because the two columns are linearly independent for $r,L_t>0$, the map from wheel velocities to the planar twist is full-rank rank two, confirming that the two actuated wheels span exactly the two controllable degrees of freedom of the base while leaving the lateral direction unactuated. That unactuated direction is the nonholonomic constraint formalised next.
+
+\subsubsection{Lagrangian Dynamics of the Nonholonomic Base}\label{meth:subsec:lagrange}
+
+The kinematic maps above prescribe \emph{what} velocities are demanded; the dynamics prescribe \emph{what torques} produce them. We adopt the generalized coordinates $\vq=\begin{bmatrix}x & y & \theta\end{bmatrix}^{\T}$ locating the axle midpoint $P_0$ and its heading, and we allow the centre of mass to be offset by a distance $d$ ahead of $P_0$ along the body $x$-axis, so that the centre-of-mass position is $x_c=x+d\cos\theta$, $y_c=y+d\sin\theta$. Differentiating and forming the total kinetic energy $T=\tfrac12 m(\dot x_c^2+\dot y_c^2)+\tfrac12 I_c\dot\theta^2$, with $m$ the platform mass and $I_c$ its moment of inertia about the vertical axis through the centre of mass, the cross terms in $\dot\theta$ produce the velocity-coupled energy $T=\tfrac12\dot{\vq}^{\T}M(\vq)\dot{\vq}$ with the configuration-dependent mass matrix
+\begin{equation}\label{meth:eq:mass}
+M(\vq)=
+\begin{bmatrix}
+m & 0 & -m d\sin\theta\\[2pt]
+0 & m & \phantom{-}m d\cos\theta\\[2pt]
+-m d\sin\theta & m d\cos\theta & I
+\end{bmatrix},
+\qquad I=I_c+m d^{2}.
+\end{equation}
+The off-diagonal entries $\pm m d\sin\theta$ and $m d\cos\theta$ are the inertial coupling produced by the centre-of-mass offset: when $d\neq 0$ a yaw acceleration generates lateral inertial reaction at $P_0$ and vice versa. The $(3,3)$ entry is the parallel-axis inertia $I=I_c+md^2$ about the axle midpoint. Setting $d=0$ collapses $M(\vq)$ to $\mathrm{diag}(m,m,I)$, the inertia of a balanced chassis whose mass centre coincides with the axle.
+
+Applying the Euler--Lagrange operator $\tfrac{d}{dt}\partial_{\dot{\vq}}T-\partial_{\vq}T$ produces, in addition to $M(\vq)\ddot{\vq}$, the velocity-quadratic Coriolis and centripetal forces $C(\vq,\dot{\vq})\dot{\vq}$. Because $M(\vq)$ depends on $\theta$ alone, the Christoffel construction $c_{ijk}=\tfrac12(\partial_k M_{ij}+\partial_j M_{ik}-\partial_i M_{jk})$ leaves only the $\theta$-derivatives, and evaluating them gives the compact form
+\begin{equation}\label{meth:eq:coriolis}
+C(\vq,\dot{\vq})=
+\begin{bmatrix}
+0 & 0 & -m d\,\dot\theta\cos\theta\\[2pt]
+0 & 0 & -m d\,\dot\theta\sin\theta\\[2pt]
+0 & 0 & 0
+\end{bmatrix},
+\end{equation}
+so that $C\dot{\vq}=\begin{bmatrix}-md\dot\theta^2\cos\theta & -md\dot\theta^2\sin\theta & 0\end{bmatrix}^{\T}$, the centripetal pull of the offset mass as the chassis yaws. With this Christoffel choice the matrix $\dot M(\vq)-2C(\vq,\dot{\vq})$ is skew-symmetric, the passivity property that underlies energy-based stability arguments for the closed loop and that any admissible factorisation of the Coriolis term must preserve~\cite{fierro1997wmr}. The wheel torques enter through the input matrix obtained by mapping each wheel force $\tau_R/r$ and $\tau_L/r$ into the heading and yaw directions,
+\begin{equation}\label{meth:eq:inputmat}
+B(\vq)=\frac{1}{r}
+\begin{bmatrix}
+\cos\theta & \cos\theta\\[2pt]
+\sin\theta & \sin\theta\\[2pt]
+L_t/2 & -L_t/2
+\end{bmatrix},
+\end{equation}
+whose first two rows again project the common-mode drive force along the heading and whose third row converts the differential force into a yaw moment of arm $L_t/2$. Rolling resistance and bearing drag are modelled as a symmetric positive-semidefinite viscous matrix $B_{\mathrm{fric}}$ acting on $\dot{\vq}$, kept deliberately separate from the input matrix $B(\vq)$.
+
+Differential drive is nonholonomic: a wheel that does not skid cannot translate sideways. This is the Pfaffian velocity constraint that the lateral velocity of $P_0$ vanish,
+\begin{equation}\label{meth:eq:pfaffian}
+A(\vq)\,\dot{\vq}=0,
+\qquad
+A(\vq)=\begin{bmatrix}\sin\theta & -\cos\theta & 0\end{bmatrix},
+\end{equation}
+which indeed evaluates to $\dot x\sin\theta-\dot y\cos\theta=0$ and is satisfied identically by the unicycle kinematics of Equation~\eqref{meth:eq:fk}. The constraint is enforced in the dynamics by a Lagrange multiplier $\lambda$, the lateral reaction force at the contact line, appended through $A^{\T}(\vq)\lambda$.
+
+\subsubsection{Standard Second-Order Form and Nonholonomic Reduction}\label{meth:subsec:reduced}
+
+Collecting Equations~\eqref{meth:eq:mass}, \eqref{meth:eq:coriolis}, \eqref{meth:eq:inputmat}, and \eqref{meth:eq:pfaffian} gives the constrained base dynamics in the standard manipulator-style second-order form
+\begin{equation}\label{meth:eq:tau-standard}
+M(\vq)\,\ddot{\vq}
++ C(\vq,\dot{\vq})\,\dot{\vq}
++ B_{\mathrm{fric}}\,\dot{\vq}
+= B(\vq)\,\tau
++ A^{\T}(\vq)\,\lambda,
+\qquad
+\tau=\begin{bmatrix}\tau_R\\\tau_L\end{bmatrix}.
+\end{equation}
+Two matrices in \eqref{meth:eq:tau-standard} share the symbol $B$ by convention but are physically distinct and are kept explicitly separate throughout this thesis: $B(\vq)$ is the $3\times2$ \emph{input matrix} that injects actuator torque, whereas $B_{\mathrm{fric}}$ is the $3\times3$ \emph{viscous-friction matrix} that dissipates it. The multiplier $\lambda$ is an unknown to be eliminated, since it represents an internal constraint force that performs no work and cannot be commanded.
+
+Elimination proceeds by parameterising the admissible velocities. Any motion that respects Equation~\eqref{meth:eq:pfaffian} must lie in the null space of $A(\vq)$; a smooth basis for that null space is
+\begin{equation}\label{meth:eq:nullspace}
+\dot{\vq}=S(\vq)\,\eta,
+\qquad
+S(\vq)=
+\begin{bmatrix}
+\cos\theta & 0\\[2pt]
+\sin\theta & 0\\[2pt]
+0 & 1
+\end{bmatrix},
+\qquad
+\eta=\begin{bmatrix}v\\\omega\end{bmatrix},
+\end{equation}
+which satisfies $A(\vq)S(\vq)=0$ identically and recovers exactly the body twist supplied by the planner. Differentiating gives $\ddot{\vq}=S\dot\eta+\dot S\eta$; substituting into \eqref{meth:eq:tau-standard} and premultiplying by $S^{\T}$ annihilates the constraint term because $S^{\T}A^{\T}=(AS)^{\T}=0$. The result is the reduced, constraint-free dynamic model
+\begin{equation}\label{meth:eq:reduced}
+\bar M\,\dot\eta + \bar C\,\eta = \bar B\,\tau,
+\qquad
+\bar M=S^{\T}M S,\;\;
+\bar C=S^{\T}(M\dot S+CS),\;\;
+\bar B=S^{\T}B.
+\end{equation}
+Carrying out the products explicitly gives $\bar M=\mathrm{diag}(m,I)$, the reduced inertia, $\bar C=\left[\begin{smallmatrix}0 & -md\,\omega\\ md\,\omega & 0\end{smallmatrix}\right]$, and $\bar B=\left[\begin{smallmatrix}1/r & 1/r\\ L_t/2r & -L_t/2r\end{smallmatrix}\right]$. Writing the two rows out and reinstating the reduced viscous coefficients $d_v$ and $d_\omega$ obtained from $S^{\T}B_{\mathrm{fric}}S$, the reduced model collapses to the two scalar equations of motion
+\begin{align}
+m\,\dot v - m d\,\omega^{2} + d_v v
+&= \tfrac{1}{r}\,(\tau_R+\tau_L),\label{meth:eq:redv}\\
+I\,\dot\omega + m d\,v\,\omega + d_\omega \omega
+&= \tfrac{L_t}{2r}\,(\tau_R-\tau_L).\label{meth:eq:redw}
+\end{align}
+Equation~\eqref{meth:eq:redv} is the translational balance: the net drive force $(\tau_R+\tau_L)/r$ accelerates the mass and, through $-md\,\omega^2$, fights the centripetal pull of the offset mass during turns. Equation~\eqref{meth:eq:redw} is the rotational balance: the differential torque $(\tau_R-\tau_L)L_t/2r$ accelerates the yaw inertia $I$ against the gyroscopic coupling $md\,v\omega$. The coupling terms in both equations are proportional to $d$, so a balanced chassis with $d=0$ yields $\bar C=0$ and the two equations decouple into the diagonal pair $m\dot v + d_v v=(\tau_R+\tau_L)/r$ and $I\dot\omega + d_\omega\omega=(\tau_R-\tau_L)L_t/2r$, a structural simplification exploited by the independent-channel velocity regulators of Section~\ref{meth:subsec:loop}.
+
+\subsubsection{Actuator Dynamics and Torque Generation}\label{meth:subsec:motor}
+
+The reduced model \eqref{meth:eq:redv}--\eqref{meth:eq:redw} demands wheel torques; those torques are produced by the geared TorqueNADO permanent-magnet DC machines driving each wheel. The electromechanical behaviour of one motor is governed by the armature circuit equation coupled to the rotor mechanical equation,
+\begin{equation}\label{meth:eq:motor}
+\begin{aligned}
+L\,\frac{di}{dt} &= V - R\,i - K_e\,\omega_m,\\
+J_m\,\dot\omega_m &= K_t\,i - b\,\omega_m - \tfrac{1}{N}\,\tau_w,
+\end{aligned}
+\end{equation}
+where $i$ is the armature current, $V$ the terminal voltage commanded by the H-bridge, $\omega_m$ the rotor speed, and $\tau_w$ the load torque reflected from the wheel through the gear ratio $N$. The machine parameters are summarised in Table~\ref{meth:tab:motor}. The back-EMF $K_e\omega_m$ couples motion into the electrical circuit, while $K_t i$ is the motor torque; their numerical equality $K_e=K_t$ is the energy-consistency property of an ideal PMDC machine in SI units.
+
+\begin{table}[!htb]
+\centering
+\footnotesize
+\caption{TorqueNADO PMDC drive parameters (per motor) used in Equations~\eqref{meth:eq:motor} and \eqref{meth:eq:ss}.}
+\label{meth:tab:motor}
+\begin{tabular}{@{}llr@{}}
+\toprule
+Symbol & Quantity & {Value} \\
+\midrule
+$R$ & Armature resistance (\ensuremath{\mathrm{\Omega}}) & 16 \\
+$L$ & Armature inductance (\ensuremath{\mathrm{mH}}) & 1 \\
+$K_e=K_t$ & Back-EMF / torque constant (\ensuremath{\mathrm{V\,s/rad}}) & 0.013178 \\
+$J_m$ & Rotor inertia (\ensuremath{\mathrm{kg\,m^{2}}}) & 0.001 \\
+$b/J_m$ & Normalised viscous damping (\ensuremath{\mathrm{s^{-1}}}) & 0.8819 \\
+$N$ & Gear ratio (--) & 60 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Because the actuator drives the wheel through a reduction $N$, the rotor quantities are referred to the wheel axle before they enter the base dynamics: the wheel turns at $\omega_w=\omega_m/N$, the rotor inertia reflects forward as $J_w=N^{2}J_m$, the viscous damping as $N^{2}b$, and the deliverable wheel torque is $\tau_w=N K_t\,i$. The large factor $N^2=3600$ shows that the reflected rotor inertia dominates the apparent wheel inertia and that the gearbox, not the bare motor, sets the mechanical scale seen by \eqref{meth:eq:redv}--\eqref{meth:eq:redw}.
+
+The two coupled first-order equations in \eqref{meth:eq:motor} possess two widely separated time constants, and this separation is what permits the controller to treat torque as an algebraic function of command. The electrical time constant is $\tau_e=L/R=\ensuremath{62.5\,\mathrm{\mu s}}$, while the mechanical time constant, including reflected damping, is $\tau_m=R J_m/(K_tK_e+Rb)\approx\ensuremath{1.134\,\mathrm{s}}$; their ratio is $\tau_e/\tau_m\approx 5.5\times10^{-5}$. The corresponding open-loop poles, the eigenvalues of the system matrix in \eqref{meth:eq:ss}, are $\{-1.6\times10^{4},\,-0.893\}\,\ensuremath{\mathrm{s^{-1}}}$, separated by more than four decades. Under such separation the singular-perturbation argument applies: on the slow mechanical time scale the fast electrical transient has already decayed, so $L\,di/dt$ may be set to zero and the current treated as the quasi-static value $i\approx(V-K_e\omega_m)/R$. The actuator then reduces to an algebraic torque source, and the inner current loop running on the motor driver can be regarded as instantaneous by the outer velocity loop. The complete electromechanical model retained for analysis and simulation is the state-space form
+\begin{equation}\label{meth:eq:ss}
+\frac{d}{dt}\begin{bmatrix}i\\[2pt]\omega_m\end{bmatrix}
+=
+\begin{bmatrix}
+-R/L & -K_e/L\\[2pt]
+K_t/J_m & -b/J_m
+\end{bmatrix}
+\begin{bmatrix}i\\[2pt]\omega_m\end{bmatrix}
++
+\begin{bmatrix}1/L\\[2pt]0\end{bmatrix}V
++
+\begin{bmatrix}0\\[2pt]-1/(N J_m)\end{bmatrix}\tau_w,
+\end{equation}
+with measured output $\omega_m$. As a design reference, the steady-state torque required to hold a constant straight-line body speed $v_0$ follows from setting $\dot\omega_m=0$ and $i$ at its quasi-static value: each wheel must supply $\tau_w^{\mathrm{ss}}=N^{2}b\,\omega_w=N^{2}b\,v_0/r=3.175\,v_0/r\ \ensuremath{\mathrm{N\,m}}$, the reflected viscous drag of the geared drive. This figure sizes the feedforward term of the velocity regulator and confirms that, with $r$ and $L_t$ inserted from the built platform, the chosen motors hold cruising speed within their continuous torque rating.
+
+\subsubsection{The Closed-Loop Motion-Control Architecture}\label{meth:subsec:loop}
+
+The preceding maps assemble into the nested feedback loop of Figure~\ref{meth:fig:ctrlloop}. The planner command $(v,\omega)$ on \texttt{/cmd\_vel}~\cite{macenski_2022_ros2,macenski_2020_nav2} is first passed through the inverse kinematics of Equation~\eqref{meth:eq:ik} to obtain the per-wheel velocity setpoints $\omega_R^{\star},\omega_L^{\star}$. Each setpoint is regulated independently on the PRIZM motor controller by a proportional--integral law augmented with the minimum-order speed observer derived in the electrical chapter, which reconstructs wheel angular velocity from quantised encoder counts so that the loop can run at a higher bandwidth than raw differencing would permit. The regulator output is delivered as a duty cycle to the PWM H-bridge, which sets the terminal voltage $V$ of Equation~\eqref{meth:eq:motor}; the motor converts that voltage to current and hence to wheel torque $\tau=(\tau_R,\tau_L)^{\T}$, which drives the base according to the reduced dynamics \eqref{meth:eq:redv}--\eqref{meth:eq:redw}. The resulting wheel rotation is sensed by the encoders, closing the inner velocity loop and, in parallel, feeding the wheel-odometry integrator that supplies the dead-reckoned pose consumed by the perception subsystem of Section~\ref{meth:sec:perception}. The architecture is therefore a reference-tracking cascade: a fast electrical loop nested inside a wheel-speed loop nested inside the kinematic command map, each level relying on the time-scale separation established in Section~\ref{meth:subsec:motor} so that the outer level may treat the inner level as ideal.
+
+\begin{figure}[!htb]
+\centering
+\scriptsize
+\begin{tikzpicture}[node distance=5mm and 6mm]
+\node[data] (cmd) {\texttt{/cmd\_vel}\\$(v,\omega)$};
+\node[proc, right=of cmd] (ik) {Inverse\\kinematics};
+\node[data, right=of ik] (set) {$\omega_R^{\star},\omega_L^{\star}$};
+\node[proc, right=of set] (pi) {PI {+}\\observer};
+\node[hw, right=of pi] (drv) {PWM\\H-bridge};
+\node[hw, right=of drv] (mot) {PMDC\\motor};
+% second row (feedback path, right to left)
+\node[box, below=9mm of mot] (dyn) {Base \&\\wheel dyn.};
+\node[hw, below=9mm of pi] (enc) {Encoders};
+\node[proc, left=of enc] (odo) {Wheel\\odometry};
+\node[data, below=8mm of dyn] (pose) {Parked\\base pose};
+% forward path
+\draw[arr] (cmd) -- (ik);
+\draw[arr] (ik) -- (set) node[lbl,midway,above]{\eqref{meth:eq:ik}};
+\draw[arr] (set) -- (pi);
+\draw[arr] (pi) -- (drv) node[lbl,midway,above]{$V$};
+\draw[arr] (drv) -- (mot);
+\draw[arr] (mot) -- (dyn) node[lbl,midway,right]{$\tau_R,\tau_L$};
+% feedback and outputs
+\draw[arr] (dyn) -- (enc) node[lbl,midway,above]{$\dot{\vq}=S\eta$};
+\draw[arr] (enc) -- (odo);
+\draw[darr] (enc) -- (pi) node[lbl,midway,right]{meas.\ $\omega_R,\omega_L$};
+\draw[arr] (dyn) -- (pose) node[lbl,midway,right]{to manipulator};
+\draw[arr] (odo) -| (cmd) node[lbl,near start,below]{to perception};
+\end{tikzpicture}
+\caption{Nested motion-control loop. The planner body twist $(v,\omega)$ is mapped by the inverse kinematics \eqref{meth:eq:ik} to wheel-speed setpoints, regulated by a PI law with a speed observer on the PRIZM controller, amplified through the PWM H-bridge to motor voltage, and converted to wheel torque that drives the reduced base dynamics \eqref{meth:eq:redv}--\eqref{meth:eq:redw}. Encoder feedback closes the inner velocity loop and feeds wheel odometry to the perception subsystem (Section~\ref{meth:sec:perception}); the realised base motion delivers the parked pose to the manipulator subsystem.}
+\label{meth:fig:ctrlloop}
+\end{figure}
+
+The closed loop is what physically realises the navigation intent: regulating $(\omega_R,\omega_L)$ to the setpoints $(\omega_R^{\star},\omega_L^{\star})$ forces the base twist to track $(v,\omega)$, and driving that twist to zero at the goal brings the chassis to rest. The output of this subsystem is therefore the realised base motion that parks the platform at the charging station with its socket-facing workspace aligned to the charging port. That stationary, accurately positioned base pose is the fixed frame $\mathcal{F}_b$ from which the manipulator of Section~\ref{meth:sec:manip} plans and executes the plug-insertion motion; the body twist commanded by the planner has, at this point, been fully transformed into wheel torques, executed, and brought to a controlled stop, handing a static and known base configuration to the arm.
+
+
+\subsection{Robotic Manipulator Control}\label{meth:sec:manip}
+
+The navigation subsystem hands this layer a parked platform: the mobile base has been driven to the charging station and halted so that the target socket, whose faceplate the perception stack has localized at approximately $(0.334,\,0,\,0.12)\,\ensuremath{\mathrm{m}}$ in the arm base frame, lies inside the reachable workspace of the manipulator. What the arm receives is therefore not a moving target but a static one expressed in its own base frame, together with the guarantee that the wheel-base will hold position for the duration of the insertion. From this point the burden of the task shifts from the centimetre-scale accuracy of wheeled docking to the millimetre-scale accuracy of mating a two-prong plug with a recessed socket, and the responsibility passes from the base controller to the three actuated joints of the Hiwonder MaxArm and its eye-in-hand camera.
+
+\subsubsection{Bus-Servo Command Chain}\label{meth:sec:manip:bus}
+
+A joint target produced by the planner or the learned policy is expressed in radians, but the Lobot serial-bus servos accept only integer pulse counts. The conversion is the affine map
+\begin{equation}
+  p_i \;=\; s_i\,q_i + o_i, \qquad i \in \{1,2,3\},
+  \label{meth:eq:servomap}
+\end{equation}
+where $q_i$ is the commanded angle of joint $i$, $p_i$ the corresponding servo pulse, $s_i$ a scale in pulses per radian, and $o_i$ the pulse that places the joint at its mechanical zero. The scale follows directly from the servo's encoding, in which a full command range of $1000$ pulses spans a mechanical arc of $\ensuremath{240^{\circ}}$:
+\begin{equation}
+  |s_i| \;=\; \frac{1000\ \text{pulses}}{\ensuremath{240^{\circ}}\cdot \tfrac{\pi}{180}} \;=\; \frac{750}{\pi} \;\approx\; 238.7324\ \text{pulses}/\ensuremath{\mathrm{rad}}.
+  \label{meth:eq:servoscale}
+\end{equation}
+The calibrated triple is $s = (238.7324,\,-238.7324,\,238.7324)$ and $o = (625,\,875,\,500)$; the sign of $s_2$ encodes the shoulder servo's reversed mounting, and the offsets $o_i$ are chosen so that the home configuration $\vq = \mathbf{0}$ maps to the centred pulses $(625,875,500)$. Each pulse vector is published as a \texttt{Float32MultiArray} $[p_1,p_2,p_3,t_{\mathrm{ms}}]$ on \texttt{/arm/servo\_command}, the fourth entry $t_{\mathrm{ms}}$ being the move duration that the servos interpolate over internally. An ESP32 microcontroller running a micro-ROS pass-through firmware subscribes to this topic and relays the pulses over a half-duplex TTL bus at $\ensuremath{115200\,\mathrm{bit/s}}$ to the three servos. The same firmware reads the servos' position telemetry and republishes it on \texttt{/arm/servo\_feedback} at $\ensuremath{20\,\mathrm{Hz}}$, where a bridge node inverts \eqref{meth:eq:servomap} to recover joint angles and populates \texttt{/joint\_states}, closing the loop that the planner and the simulator both observe. The control policies that drive this chain are trained entirely in simulation on the Isaac Lab framework \cite{mittal_2023_orbit}, whose GPU-parallel physics \cite{makoviychuk_2021_isaacgym} makes the thousands of contact-rich insertion episodes required for reinforcement learning tractable; the affine map \eqref{meth:eq:servomap} is the single interface across which a policy trained on idealized radians is realized on physical pulses.
+
+\subsubsection{Passively Levelled Wrist}\label{meth:sec:manip:wrist}
+
+The MaxArm actuates a base yaw $q_1$ about the vertical and two coplanar pitch joints, the shoulder $q_2$ and the elbow $q_3$, about parallel horizontal axes. A fourth pitch joint $q_4$ carries the end-effector, but it is not driven by a servo; a parallel four-bar linkage couples it mechanically to the proximal joints. Because the three pitch joints rotate about parallel axes, the absolute pitch of the end-effector link in the vertical plane is the sum of their angles, $\phi = q_2 + q_3 + q_4$. The plug must approach the vertical socket faceplate along a fixed horizontal attitude, which requires $\phi$ to be held constant for every shoulder--elbow combination. The linkage enforces exactly this holonomic constraint,
+\begin{equation}
+  q_2 + q_3 + q_4 \;=\; \tfrac{3\pi}{2} \;=\; \mathrm{const},
+  \label{meth:eq:level}
+\end{equation}
+from which the wrist angle is determined entirely by the actuated joints,
+\begin{equation}
+  q_4 \;=\; \tfrac{3\pi}{2} - q_2 - q_3.
+  \label{meth:eq:wrist}
+\end{equation}
+At the home configuration $q_2 = q_3 = 0$ this yields $q_4 = \tfrac{3\pi}{2} \approx \ensuremath{4.712389\,\mathrm{rad}}$, the offset absorbed by the linkage geometry, and the plug rests level. Making this degree of freedom passive is a deliberate design choice rather than an economy. It removes one servo together with its driver, calibration, and failure mode; it converts plug attitude from a quantity that a controller must regulate, and could regulate incorrectly, into a mechanical invariant guaranteed by \eqref{meth:eq:level}; and it reduces the dimension of every motion command and every learned action from four to three, since $q_4$ is reconstructed from \eqref{meth:eq:wrist} at each step and never appears as a decision variable.
+
+\subsubsection{Camera-Based Visual Plugging}\label{meth:sec:manip:vision}
+
+A Logitech HD camera baked onto the end-effector provides the only exteroceptive feedback during insertion, an eye-in-hand arrangement in which the sensor moves rigidly with the plug whose tip sits $\ensuremath{0.25\,\mathrm{m}}$ ahead of the wrist. The two circular holes of the socket are the visual features. A hole at position $(X_c, Y_c, Z_c)$ in the camera frame projects, under the pinhole model, to the normalized bearing
+\begin{equation}
+  (n_x,\, n_y) \;=\; \Big(\tfrac{X_c}{Z_c},\, \tfrac{Y_c}{Z_c}\Big),
+  \label{meth:eq:bearing}
+\end{equation}
+a pair of dimensionless image-plane coordinates that encodes the direction to the hole without requiring its depth. Each of the two holes contributes such a bearing together with a binary visibility flag $\mathrm{vis}\in\{0,1\}$ that is unset, and the bearing zeroed, whenever the hole falls outside the camera's field of view. Driving the plug so as to centre these bearings is image-based visual servoing in the classical sense \cite{chaumette_2006_visualservo}: the control objective is defined directly in the image, sidestepping the explicit reconstruction of the socket's six-degree-of-freedom pose. Where a full metric pose is required, category-level keypoint estimators such as CenterPose \cite{lin_2022_centerpose} can supply it from the same monocular stream; the present system favours the lighter bearing representation \eqref{meth:eq:bearing} because it is exactly the quantity a hand-mounted camera measures most reliably at close range.
+
+\subsubsection{Reinforcement-Learning Insertion Policy}\label{meth:sec:manip:rl}
+
+The alignment and insertion motion is generated by a learned policy trained with an asymmetric actor--critic. The actor observes only quantities available on the physical robot, assembled into the fifteen-dimensional vector
+\begin{equation}
+  \vu^{a} \;=\; \big[\,n^{L}_x, n^{L}_y, \mathrm{vis}^{L},\; n^{R}_x, n^{R}_y, \mathrm{vis}^{R},\; \vq,\; \dot{\vq},\; \vu_{t-1}\,\big] \in \R^{15},
+  \label{meth:eq:obs}
+\end{equation}
+comprising the two hole bearings of \eqref{meth:eq:bearing}, the three measured joint angles $\vq$, their velocities $\dot{\vq}$, and the previous action $\vu_{t-1}$. Because every component of \eqref{meth:eq:obs} comes from the eye-in-hand camera or the joint encoders, the actor is deployable without modification. The critic, used only during training, is given a privileged twelve-dimensional state in which the noisy bearings are replaced by the ground-truth plug-to-socket position error, information that accelerates value estimation but is unavailable at run time. Both networks are optimized with proximal policy optimization \cite{schulman_2017_ppo}, and pixel-level noise of standard deviation $\sigma = 0.012$ is injected into the simulated bearings so that the actor learns to tolerate the imprecision of the real camera. The policy emits a bounded joint increment $\Delta\vq_t \in \R^3$, capped at $\ensuremath{3^{\circ}}$ per axis per step, which is integrated as
+\begin{equation}
+  \vq_{t+1} \;=\; \vq_t + \Delta\vq_t, \qquad \Delta\vq_t = \pi_\theta(\vu^{a}_t),
+  \label{meth:eq:action}
+\end{equation}
+with the passive wrist \eqref{meth:eq:wrist} re-evaluated at every step so that the plug stays level throughout the approach. Through repeated correction of the bearing error the policy walks the plug tip onto the socket axis and drives it forward into the recess.
+
+\subsubsection{Insertion Sequence and Contact Validation}\label{meth:sec:manip:fsm}
+
+The complete plugging operation is sequenced as the finite-state machine of Figure~\ref{meth:fig:manippipe}. From an \emph{Approach} state that brings the socket into the camera's field of view, control passes to \emph{Visual Alignment}, in which the policy of \eqref{meth:eq:action} centres the hole bearings; once the bearings are centred the machine commits to an \emph{Insertion Thrust} that pushes the plug along its axis, and finally to \emph{Validation}, which confirms seating before the charging contactor is engaged.
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[node distance=10mm and 15mm]
+  \node[state] (s1) {Approach};
+  \node[state, right=of s1] (s2) {Visual\\Alignment};
+  \node[state, right=of s2] (s3) {Insertion\\Thrust};
+  \node[state, right=of s3] (s4) {Validation};
+  \node[proc, right=of s4] (done) {Charging\\Engaged};
+  \draw[arr] (s1) -- node[lbl, above]{socket in FOV} (s2);
+  \draw[arr] (s2) -- node[lbl, above]{bearings centred} (s3);
+  \draw[arr] (s3) -- node[lbl, above]{$b{=}1$} (s4);
+  \draw[arr] (s4) -- node[lbl, above]{$b$ held} (done);
+  \draw[darr] (s3.north) to[out=120, in=60] node[lbl, above]{$b{=}0$, timeout} (s2.north);
+\end{tikzpicture}
+\caption{Plugging finite-state machine. The eye-in-hand policy drives \emph{Visual Alignment}; the \emph{Insertion Thrust} is validated by the plug-mounted limit switch, whose closure $b{=}1$ confirms electrical seating and advances the machine to charging, while a thrust that fails to close the switch returns control to alignment for another attempt.}
+\label{meth:fig:manippipe}
+\end{figure}
+
+The transition out of the thrust is governed not by a force measurement but by a single contact sense. A Normally-Open limit switch is mounted on the plug, wired so that its binary observation $b$ satisfies
+\begin{equation}
+  b \;=\;
+  \begin{cases}
+    1, & \text{plug fully seated (switch closed)},\\
+    0, & \text{otherwise (switch open)},
+  \end{cases}
+  \label{meth:eq:limitswitch}
+\end{equation}
+the switch closing only when the plug bottoms out in the socket recess. The event $b=1$ is therefore the success criterion of \eqref{meth:eq:limitswitch}: it terminates the insertion thrust, advances the machine to \emph{Validation}, and confirms that genuine electrical contact has been made. A thrust that does not close the switch within the allotted time leaves $b=0$ and returns the machine to \emph{Visual Alignment} for a fresh attempt. This switch is the only true contact sensor on the system; the manipulator carries no force/torque transducer, and what is described elsewhere as force-aware safety is realized geometrically, through the wall-cross constraint that forbids the plug from crossing the socket faceplate off-axis and through joint-limit margins, rather than through any measurement of interaction force.
+
+A confirmed insertion, the latching of $b=1$ held through \emph{Validation}, completes the autonomous charging task: the plug is mated, electrical continuity is established, and the manipulator's work is done. Control now passes from the arm to the system-integration layer, which is the subject of the section that follows and which describes how the navigation, perception, manipulation, and mission-management subsystems are orchestrated as a single closed-loop charging behaviour.
+
+
+\subsection{System Integration}\label{meth:sec:integration}
+
+The preceding sections constructed the autonomous charging agent one subsystem at a time, each handing a well-defined mathematical product to the next. Section~\ref{meth:sec:arch} fixed the distributed hardware and software architecture; Section~\ref{meth:sec:perception} delivered the calibrated colour image $I(u)$, the metric depth $Z(u)$, the inertial stream, and the differential-drive wheel-odometry prior $T^{O}_{B}$; Section~\ref{meth:sec:slam} fused these into the drift-corrected global pose $T^{W}_{B}$; Section~\ref{meth:sec:nvblox} integrated the registered depth into the Euclidean signed distance field $\Phi(x)$ and the inflated costmap $c(x)$; Section~\ref{meth:sec:nav} planned over that map and emitted the body twist $\texttt{/cmd\_vel}=(v,\omega)$; Section~\ref{meth:sec:dyn} converted the twist into wheel torques and realised the base motion that parks the platform at the station; and Section~\ref{meth:sec:manip} closed the task with the camera-driven insertion policy whose success is certified by the limit-switch bit $b=1$. What remains is to explain how these computations execute concurrently across two machines and one microcontroller, and to justify quantitatively why the work is partitioned where it is.
+
+The partition follows the resources each computation actually demands. The Raspberry~Pi~4 is restricted to what must be physically close to the sensors and actuators: it hosts the RealSense and Logitech USB drivers, reads the wheel encoders and the plug limit switch, runs the custom PRIZM serial-to-ROS~2 bridge, and exposes the ESP32 micro-ROS endpoint. It performs no estimation, mapping, planning, or learning. The laptop carries the entire heavy stack---dynamic visual SLAM, nvblox volumetric fusion, the Nav2 planner and MPPI controller, the socket detector, and the manipulation policy---because every one of these is bound by GPU throughput or by sustained multi-core floating-point work that the Pi cannot supply within a battery and thermal budget mounted on a moving base. The two machines are joined by a 5\,\ensuremath{\mathrm{GHz}} 802.11ac link over which sensor topics travel upward and velocity commands travel downward; the ESP32 joins the same DDS graph directly through a \texttt{micro\_ros\_agent}, whereas the PRIZM, an Arduino-class controller that cannot run a micro-ROS client, is reachable only through the bridge node. The resulting computation graph preserves this machine boundary: sensor data move to the laptop for estimation and planning, while only compact setpoints return to the Pi-side actuator bridges.
+
+The dominant integration concern is end-to-end latency around the outer navigation loop. Decomposing one perception-to-command cycle into its physical hops gives
+\begin{equation}
+T_{\mathrm{loop}}
+= t_{\mathrm{acq}}
++ t_{\mathrm{tx}}^{\uparrow}
++ t_{\mathrm{cmp}}
++ t_{\mathrm{tx}}^{\downarrow}
++ t_{\mathrm{act}},
+\label{meth:eq:latency}
+\end{equation}
+where $t_{\mathrm{acq}}$ is sensor exposure plus driver assembly on the Pi, $t_{\mathrm{tx}}^{\uparrow}$ the compressed-frame transmission to the laptop, $t_{\mathrm{cmp}}$ the SLAM, mapping, and planning computation, $t_{\mathrm{tx}}^{\downarrow}$ the return of the small twist packet, and $t_{\mathrm{act}}$ the bridge-plus-serial dispatch to the PRIZM. The first four terms are each of order \ensuremath{5\text{--}50\,\mathrm{ms}}, so $T_{\mathrm{loop}}$ sits in the tens-of-milliseconds range, i.e.\ an outer loop refreshing at roughly \ensuremath{10\text{--}20\,\mathrm{Hz}}---adequate for steering a slow indoor base but far too coarse for regulating motor speed. This is precisely why the wheel velocity loop is not part of Equation~\eqref{meth:eq:latency}: as established in Section~\ref{meth:sec:dyn}, the proportional--integral regulator and its speed observer run \emph{locally} on the PRIZM at $\ge\!\ensuremath{100\,\mathrm{Hz}}$ with sub-millisecond encoder latency, so the actuator-rate control never crosses WiFi. The laptop sends only a velocity \emph{setpoint}; a dropped or delayed packet degrades the trajectory the base follows but cannot destabilise the torque loop that holds it.
+
+Bandwidth is the second constraint, and it is met. The upward budget is dominated by the two image streams,
+\begin{equation}
+B_{\uparrow}
+\approx B_{\mathrm{rgb}} + B_{\mathrm{depth}} + B_{\mathrm{imu}}
+\approx \ensuremath{16\,\mathrm{MB/s}}
+\approx \ensuremath{130\,\mathrm{Mb/s}},
+\label{meth:eq:bw}
+\end{equation}
+in which a compressed \ensuremath{720\,\mathrm{p}} colour frame and a compressed \ensuremath{16\,\mathrm{bit}} depth frame at \ensuremath{30\,\mathrm{Hz}} each contribute on the order of \ensuremath{8\,\mathrm{MB/s}} while the inertial stream is negligible at a few kilobytes per second. Against the few-hundred \ensuremath{\mathrm{Mb/s}} of usable throughput that a clean 5\,\ensuremath{\mathrm{GHz}} 802.11ac channel delivers, Equation~\eqref{meth:eq:bw} leaves substantial headroom. The headroom is preserved by the Quality-of-Service profile rather than spent carelessly: the high-rate image topics use a best-effort, keep-last depth-one policy, so a late frame is simply superseded by the next one instead of being retransmitted, whereas static transforms and latched maps use a reliable, transient-local policy so that a node joining the graph late still receives them exactly once. Because DDS provides this discovery and transport uniformly, a subscriber on the laptop treats a topic published on the Pi exactly as it would a local one, which is what allows the physical split to be drawn cleanly in software without bespoke networking code~\cite{macenski_2022_ros2}.
+
+Taken together, the architecture is the consequence of three hard requirements rather than a stylistic choice: the GPU-bound SLAM and nvblox stages must sit on the laptop; the safety-critical, high-rate wheel loop must sit on the microcontroller next to the motors; and the middleware must make the WiFi boundary between them transparent so that the planner, the mapper, and the bridge can be written as if co-located. With the placement and the communication budget fixed, the next section traces a single charging mission through the integrated system to show how the data products of Sections~\ref{meth:sec:perception}, \ref{meth:sec:slam}, \ref{meth:sec:nvblox}, \ref{meth:sec:nav}, \ref{meth:sec:dyn}, and \ref{meth:sec:manip} flow end to end.
+
+\subsection{Complete Data Flow}\label{meth:sec:dataflow}
+
+A single autonomous charging mission threads the entire chapter together as one directed flow of data products, each edge carrying the exact quantity derived in the section that produces it. Figure~\ref{meth:fig:dataflow} renders this flow; the narrative below walks it in execution order, naming the message on every edge.
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[node distance=11mm and 9mm, font=\scriptsize,
+  every node/.style={align=center}]
+% --- top row: perception to navigation ---
+\node[hw] (cam) {RealSense D435i\\(RGB + depth, IMU)};
+\node[proc, right=of cam] (slam) {Dynamic Visual\\SLAM};
+\node[proc, right=of slam] (nvblox) {nvblox\\TSDF $\to$ ESDF};
+\node[proc, right=of nvblox] (nav) {Nav2\\A$^\star$ + MPPI};
+% --- bottom row: actuation to manipulation (right to left) ---
+\node[hw, below=14mm of nav] (prizm) {PRIZM +\\wheels};
+\node[proc, left=of prizm] (socket) {Logitech +\\socket detector};
+\node[proc, left=of socket] (policy) {Manipulator\\RL policy};
+\node[hw, left=of policy] (switch) {Insertion +\\limit switch};
+\node[state, left=of switch] (done) {Charging\\task done};
+% --- forward edges, top row ---
+\draw[arr] (cam) -- node[midway, below=15pt, lbl] {$I(u),\,Z(u)$} (slam);
+\draw[arr] (slam) -- node[midway, below=15pt, lbl]{depth + $T^{W}_{B}$} (nvblox);
+\draw[arr] (nvblox) -- node[midway, below=15pt, lbl]{$\Phi(x),\,c(x)$} (nav);
+\draw[darr] (slam) to[bend left=22] node[lbl]{pose $T^{W}_{B}$} (nav);
+% --- column link ---
+\draw[arr] (nav) -- node[lbl,right]{\texttt{/cmd\_vel}$=(v,\omega)$} (prizm);
+% --- forward edges, bottom row (right to left) ---
+\draw[arr] (prizm) -- node[midway, below=15pt, lbl]{parked base,\\wheel odom.} (socket);
+\draw[arr] (socket) -- node[midway, below=15pt, lbl]{hole bearings\\$(n_x,n_y)$} (policy);
+\draw[arr] (policy) -- node[midway, below=15pt, lbl]{joint cmds $\vq_{\mathrm{des}}$} (switch);
+\draw[arr] (switch) -- node[midway, below=15pt, lbl]{switch bit $b{=}1$} (done);
+\end{tikzpicture}
+\caption{End-to-end data flow of one charging mission. Red blocks are physical devices on the Raspberry~Pi or ESP32; blue blocks are laptop computations. Each edge is annotated with the data product it carries, from raw RGB-D imagery through the global pose, the distance field, the planned twist, the parked base, the socket-hole bearings, the joint commands, and finally the limit-switch confirmation.}
+\label{meth:fig:dataflow}
+\end{figure}
+
+The mission begins at the eye of the system. The RealSense~D435i publishes a calibrated colour image $I(u)$ and a metrically aligned depth image $Z(u)$ at \ensuremath{30\,\mathrm{Hz}}, together with the inertial stream, all acquired on the Pi and forwarded to the laptop. Dynamic visual SLAM consumes the RGB-D pair, extracts and matches features, rejects observations falling on detected moving objects, and solves the windowed bundle-adjustment problem of Section~\ref{meth:sec:slam} to produce the global pose $T^{W}_{B}$. That pose is the pivot of the whole flow: it is published as the \texttt{map}$\to$\texttt{odom}$\to$\texttt{base\_link} transform chain and consumed simultaneously by two downstream stages. nvblox takes the same depth image \emph{registered by} $T^{W}_{B}$ and fuses it frame-by-frame into the truncated signed distance field, from which it extracts the two-dimensional Euclidean distance slice $\Phi(x)$ and the inflated costmap $c(x)$. Nav2 receives both the pose---answering ``where am I''---and the costmap---answering ``what is around me''---and runs the A$^\star$ global planner to lay a path to the charging station and the MPPI controller to track it, emitting the body twist $\texttt{/cmd\_vel}=(v,\omega)$.
+
+The twist crosses the WiFi link back to the Pi, where the PRIZM bridge applies the inverse kinematics of Section~\ref{meth:sec:dyn} to convert it into per-wheel velocity setpoints and dispatches them over the serial bus; the local velocity regulator turns those setpoints into wheel torques, and the encoders return the realised wheel motion as odometry, which both feeds the platform forward and re-enters SLAM as the motion prior. The base thus drives itself to the station and parks within the manipulator's reach. Control then passes to the arm. The eye-in-hand Logitech camera, baked on the end-effector, views the socket; the detector projects the two charging holes into image bearings $(n_x,n_y)$ that form the deployable observation for the asymmetric actor--critic policy of Section~\ref{meth:sec:manip}. The policy issues incremental joint commands $\vq_{\mathrm{des}}$ that align the plug, the passive leveling wrist holding the plug attitude, and drives the insertion thrust. The flow terminates at the only true contact sense on the platform: the normally-open limit switch closes as the plug seats, raising the bit to $b=1$, which simultaneously certifies electrical contact and signals mission completion. Every edge in Figure~\ref{meth:fig:dataflow} is therefore a typed message---image, pose, distance field, plan, twist, odometry, joint command, and switch bit---and the mission succeeds precisely when that chain runs to its final boolean.
+
+\subsection{Control Loop Summary}\label{meth:sec:ctrlsummary}
+
+The mission of Section~\ref{meth:sec:dataflow} is not executed by a single loop but by a hierarchy of loops running at sharply different rates and on different processors. Table~\ref{meth:tab:loops} collects them, from the slowest global planning loop down to the fastest local velocity loop, together with the machine each runs on and the function it performs.
+
+\begin{table}[!htb]
+\centering
+\caption{Nested control and estimation loops of the integrated charging agent, ordered from the fast, local inner loops to the slow, global outer loops. The inner the loop, the higher its rate and the closer it runs to the actuator.}
+\label{meth:tab:loops}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Loop & Rate & Location & Function \\
+\midrule
+Wheel velocity regulation & $\ge\!\ensuremath{100\,\mathrm{Hz}}$ & PRIZM (local) & torque-level speed tracking \\
+Servo feedback (arm) & \ensuremath{20\,\mathrm{Hz}} & ESP32 & joint state, plug alignment \\
+MPPI local controller & \ensuremath{20\text{--}30\,\mathrm{Hz}} & Laptop & generate \texttt{/cmd\_vel} \\
+Camera / depth acquisition & $\sim\!\ensuremath{30\,\mathrm{Hz}}$ & Pi (RealSense) & RGB-D + IMU frames \\
+SLAM frontend & $\sim\!\ensuremath{30\,\mathrm{Hz}}$ & Laptop & per-frame pose tracking \\
+nvblox TSDF/ESDF fusion & $\sim\!\ensuremath{10\,\mathrm{Hz}}$ & Laptop & distance field $\Phi(x)$ \\
+Nav2 global planner (A$^\star$) & $\sim\!\ensuremath{1\,\mathrm{Hz}}$ & Laptop & replan global path \\
+SLAM sliding-window BA & $\sim\!\ensuremath{0.5\,\mathrm{Hz}}$ & Laptop & windowed pose/landmark refine \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The organising principle is a strict separation of timescales: the inner the loop, the faster it must run and the more local it is kept. At the bottom of the table the wheel velocity regulator closes at over \ensuremath{100\,\mathrm{Hz}} entirely on the PRIZM, because rejecting load and friction disturbances at the torque level demands a bandwidth that no network-mediated loop can guarantee; the servo feedback on the ESP32 plays the analogous role for the arm at \ensuremath{20\,\mathrm{Hz}}. These local loops accept a setpoint and are otherwise autonomous. Above them, the MPPI controller recomputes the twist at \ensuremath{20\text{--}30\,\mathrm{Hz}}, fast enough to react to the costmap as obstacles appear but slow enough to afford a full sampling-based optimisation each cycle. The perception and estimation loops---camera acquisition and the SLAM frontend at \ensuremath{30\,\mathrm{Hz}}, volumetric fusion at \ensuremath{10\,\mathrm{Hz}}---supply the state and the map that the controller consumes. At the top, the genuinely global computations run slowest: the A$^\star$ planner replans only about once per second because a new global path is needed only when the goal or the large-scale map changes, and the sliding-window bundle adjustment refines the trajectory at roughly \ensuremath{0.5\,\mathrm{Hz}} because batch optimisation over ten keyframes is expensive and need not keep pace with the frame rate.
+
+These loops are not independent; they cascade. The slow planner produces a path that the medium-rate MPPI controller tracks; the controller produces a twist that the inverse kinematics of Section~\ref{meth:sec:dyn} resolves into wheel setpoints; and the fast PRIZM regulator drives those setpoints to zero error against encoder feedback whose odometry returns up the chain to SLAM. Each layer presents a clean reference to the one below and a clean measurement to the one above, so a fast inner loop can reject disturbances long before the slow outer loop is even aware of them, and the slow outer loop can reason about the whole map without being burdened by motor dynamics. The closed-loop block diagram of Figure~\ref{meth:fig:ctrlloop} shows this nesting concretely for the base; the manipulator pipeline of Figure~\ref{meth:fig:manippipe} is its counterpart for the arm. It is this layered, rate-separated, and physically distributed organisation---global reasoning on the laptop, fast regulation on the microcontroller, transparent DDS transport between them---that allows a single low-cost RGB-D camera, a modest wheeled base, and a microcontroller-driven three-degree-of-freedom arm to function not as isolated devices but as one coherent autonomous agent that localises itself, maps its surroundings, navigates to a charging station, and plugs itself in.
+
+
+
+\clearpage
+\endgroup
