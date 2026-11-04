@@ -8,16 +8,29 @@ internal disk is full.
 
 import os
 
-# --- Isaac Sim 5.1.0 standalone (use the MOUNTED DataDrive1 path; the install's own
-#     _isaac_sim symlink points at an unmounted drive and is broken). ---
-ISAAC_ROOT = "/media/salman/DataDrive1/isaac-sim-standalone-5.1.0-linux-x86_64"
+# Every machine-specific path below can be overridden with an environment variable,
+# so the package runs unchanged on another workstation:
+#   NEW_ARM_ISAAC_ROOT   Isaac Sim install
+#   NEW_ARM_WORKSPACE    folder that contains new_arm_description/
+#   NEW_ARM_DATA_DIR     heavy USD / cache / render output
+
+# --- Isaac Sim 5.1.0 (binary; /media/salman/DataDrive1 turned out to be the FULL ROOT
+#     disk, not the ext4 data drive — the real Isaac Sim + data live on /DataDrive). ---
+ISAAC_ROOT = os.environ.get("NEW_ARM_ISAAC_ROOT", "/DataDrive/isaac-sim")
 
 # --- Our robot description (single source of truth) ---
-WORKSPACE = "/home/salman/Documents/our_work"
+# Default: the sibling new_arm_description/ in this repository (arm/), falling back to
+# the original workstation layout if the package is installed somewhere else.
+_REPO_ARM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if os.path.isdir(os.path.join(_REPO_ARM_DIR, "new_arm_description")):
+    _DEFAULT_WORKSPACE = _REPO_ARM_DIR
+else:
+    _DEFAULT_WORKSPACE = "/home/salman/Documents/our_work"
+WORKSPACE = os.environ.get("NEW_ARM_WORKSPACE", _DEFAULT_WORKSPACE)
 URDF_PATH = os.path.join(WORKSPACE, "new_arm_description/urdf/new_arm.urdf")
 
-# --- Output / scratch (MUST live off the full root disk) ---
-DATA_DIR = "/media/salman/DataDrive1/new_arm_isaac"
+# --- Output / scratch (MUST live off the full root disk -> the real ext4 /DataDrive) ---
+DATA_DIR = os.environ.get("NEW_ARM_DATA_DIR", "/DataDrive/new_arm_isaac")
 USD_PATH = os.path.join(DATA_DIR, "usd", "new_arm.usd")
 SOCKET_USD_PATH = os.path.join(DATA_DIR, "usd", "socket.usd")  # standalone socket (for the demo + SDG)
 SOCKET_MARKER_USD_PATH = os.path.join(DATA_DIR, "usd", "socket_marker.usd")  # hole-centred socket for per-env RL markers
